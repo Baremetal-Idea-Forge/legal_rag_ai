@@ -15,8 +15,10 @@ class Settings(BaseSettings):
     TYPESENSE_API_KEY: str = "xyz"
     TYPESENSE_CONNECTION_TIMEOUT: int = 5
 
-    # Collection
+    # Collections
+    # TYPESENSE_TASKS_COLLECTION kept for backward compatibility
     TYPESENSE_TASKS_COLLECTION: str = "tasks"
+    TYPESENSE_PDF_CHUNKS_COLLECTION: str = "pdf_chunks"
 
     model_config = SettingsConfigDict(
         env_file=".env",

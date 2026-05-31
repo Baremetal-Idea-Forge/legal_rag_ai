@@ -1,0 +1,35 @@
+[project]
+name = "legal-rag-ai"
+version = "0.1.0"
+description = "Legal RAG AI — PDF ingestion, semantic search, and Q&A over legal documents."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    # Web framework
+    "fastapi>=0.136.3",
+    "uvicorn[standard]>=0.34.0",
+    "python-multipart>=0.0.20",       # required for FastAPI file-upload endpoints
+
+    # Settings / env
+    "pydantic-settings>=2.14.1",
+
+    # PDF extraction
+    "pymupdf>=1.27.2.3",
+
+    # Embeddings
+    "sentence-transformers>=5.5.1",
+    "numpy>=2.4.6",
+
+    # Vector / full-text search
+    "typesense>=2.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"

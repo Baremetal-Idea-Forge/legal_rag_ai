@@ -5,7 +5,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.config import get_settings
-from routers import tasks_router
 import helpers.typesense_helper as ts
 
 logging.basicConfig(
@@ -21,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ---------- startup ----------
     settings = get_settings()
     logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
 
@@ -32,9 +30,8 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Typesense unavailable at startup: %s", exc)
 
-    yield  # app is running
+    yield
 
-    # ---------- shutdown ----------
     logger.info("Shutting down.")
 
 
@@ -48,25 +45,28 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
         version=settings.APP_VERSION,
-        description="Task management API with Typesense full-text search.",
+        description="Legal RAG AI — PDF ingestion and semantic search over legal documents.",
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
     )
 
-    # CORS — tighten origins in production
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=["*"],      # tighten in production
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    # Routers
-    app.include_router(tasks_router)
+    # ---------------------------------------------------------------------------
+    # Routers (add here as they are implemented)
+    # ---------------------------------------------------------------------------
+    # from routers.ingest import router as ingest_router
+    # from routers.search import router as search_router
+    # app.include_router(ingest_router, prefix="/ingest", tags=["Ingest"])
+    # app.include_router(search_router, prefix="/search", tags=["Search"])
 
-    # Health check
     @app.get("/health", tags=["Health"])
     def health():
         return {"status": "ok", "version": settings.APP_VERSION}
@@ -77,7 +77,7 @@ def create_app() -> FastAPI:
 app = create_app()
 
 # ---------------------------------------------------------------------------
-# Dev runner
+# Dev runner (invoked by the project-root main.py or directly)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

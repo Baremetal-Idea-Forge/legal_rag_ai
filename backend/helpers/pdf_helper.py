@@ -4,7 +4,6 @@ import hashlib
 import logging
 import os
 import re
-import shutil
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -176,12 +175,17 @@ class PDFHelper:
             raise FileNotFoundError(str(pdf_path))
 
         pages: list[PDFPageText] = []
-        with pymupdf.open(pdf_path) as doc:
-            for idx in range(doc.page_count):
-                page = doc.load_page(idx)
-                text = page.get_text("text") or ""
-                text = self._normalize_text(text)
-                pages.append(PDFPageText(page_number=idx + 1, text=text))
+        try:
+            with pymupdf.open(pdf_path) as doc:
+                for idx in range(doc.page_count):
+                    page = doc.load_page(idx)
+                    text = page.get_text("text") or ""
+                    text = self._normalize_text(text)
+                    pages.append(PDFPageText(page_number=idx + 1, text=text))
+        except RuntimeError as exc:
+            raise ValueError(
+                f"Cannot read PDF (corrupted or unsupported format): {pdf_path}"
+            ) from exc
 
         return pages
 
@@ -195,6 +199,10 @@ class PDFHelper:
         """
         Group consecutive pages into chunks up to max_chars.
         If a single page is too large, split it into smaller chunks.
+
+        Consecutive accumulated chunks share overlap_chars characters from the
+        end of the previous chunk, improving RAG recall at chunk boundaries.
+        Overlap is skipped when the next page is too large to fit alongside it.
         """
         chunks: list[PDFChunk] = []
 
@@ -204,8 +212,28 @@ class PDFHelper:
         current_end_page: int | None = None
         chunk_index = 0
 
+        # FIX B1: carry overlap text from each flushed chunk into the next
+        _overlap_text: str = ""
+        _overlap_page: int | None = None
+
+        def _seed_overlap(next_page_len: int) -> None:
+            """Prepend overlap carry into the current buffer if it fits."""
+            nonlocal current_parts, current_len, current_start_page, current_end_page
+            nonlocal _overlap_text, _overlap_page
+            if not _overlap_text:
+                return
+            fits = len(_overlap_text) + 2 + next_page_len <= max_chars
+            if fits:
+                current_parts.append(_overlap_text)
+                current_len = len(_overlap_text)
+                current_start_page = _overlap_page
+                current_end_page = _overlap_page
+            _overlap_text = ""
+            _overlap_page = None
+
         def flush_current() -> None:
-            nonlocal current_parts, current_len, current_start_page, current_end_page, chunk_index
+            nonlocal current_parts, current_len, current_start_page, current_end_page
+            nonlocal chunk_index, _overlap_text, _overlap_page
             if not current_parts:
                 return
             content = "\n\n".join(current_parts).strip()
@@ -219,7 +247,13 @@ class PDFHelper:
                     )
                 )
                 chunk_index += 1
-            current_parts = []
+                if overlap_chars > 0 and len(content) > overlap_chars:
+                    _overlap_text = content[-overlap_chars:].strip()
+                    _overlap_page = current_end_page
+                else:
+                    _overlap_text = ""
+                    _overlap_page = None
+            current_parts.clear()
             current_len = 0
             current_start_page = None
             current_end_page = None
@@ -231,7 +265,12 @@ class PDFHelper:
 
             if len(page_text) > max_chars:
                 flush_current()
-                page_chunks = self._split_long_text(page_text, max_chars=max_chars, overlap_chars=overlap_chars)
+                # Large-page split manages its own overlap; discard carry
+                _overlap_text = ""
+                _overlap_page = None
+                page_chunks = self._split_long_text(
+                    page_text, max_chars=max_chars, overlap_chars=overlap_chars
+                )
                 for piece in page_chunks:
                     piece = piece.strip()
                     if not piece:
@@ -247,9 +286,14 @@ class PDFHelper:
                     chunk_index += 1
                 continue
 
+            # Seed a fresh buffer with overlap from the previous chunk
+            if not current_parts:
+                _seed_overlap(len(page_text))
+
             candidate_len = current_len + len(page_text) + (2 if current_parts else 0)
             if current_parts and candidate_len > max_chars:
                 flush_current()
+                _seed_overlap(len(page_text))
 
             if not current_parts:
                 current_start_page = page.page_number
@@ -269,6 +313,9 @@ class PDFHelper:
     ) -> list[dict[str, Any]]:
         """
         Convert chunks into Typesense-ready documents with shared PDF metadata.
+
+        FIX B4: emit both page_start/page_end for range tracking and a single
+        `page` field (= page_start) to satisfy the Typesense schema's int32 sort field.
         """
         pdf_dict = asdict(pdf) if isinstance(pdf, StoredPDF) else dict(pdf)
 
@@ -284,6 +331,8 @@ class PDFHelper:
                     "local_path": pdf_dict["local_path"],
                     "page_start": chunk_dict["page_start"],
                     "page_end": chunk_dict["page_end"],
+                    # Schema sort field: use page_start as the representative page
+                    "page": chunk_dict["page_start"],
                     "chunk_index": chunk_dict["chunk_index"],
                     "content": chunk_dict["content"],
                 }
@@ -305,6 +354,8 @@ class PDFHelper:
 
     @staticmethod
     def _normalize_text(text: str) -> str:
+        # FIX B3: normalise CRLF and bare CR before any other processing
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         text = text.replace("\x00", " ")
         text = re.sub(r"[ \t]+", " ", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -315,6 +366,9 @@ class PDFHelper:
         """
         Split a large block of text into overlapping pieces.
         This is a fallback for very large pages or extracted legal clauses.
+
+        FIX B2: carry overlap_chars from each flushed paragraph group into the
+        next group so that consecutive pieces share context.
         """
         if max_chars <= 0:
             raise ValueError("max_chars must be > 0")
@@ -347,8 +401,17 @@ class PDFHelper:
                 current = candidate
             else:
                 pieces.append(current)
+                # FIX B2: seed next paragraph group with overlap from current
+                overlap_seed = (
+                    current[-overlap_chars:].strip()
+                    if overlap_chars > 0 and len(current) > overlap_chars
+                    else ""
+                )
                 if len(para) <= max_chars:
-                    current = para
+                    if overlap_seed and len(overlap_seed) + 2 + len(para) <= max_chars:
+                        current = overlap_seed + "\n\n" + para
+                    else:
+                        current = para
                 else:
                     pieces.extend(
                         PDFHelper._hard_split_text(
@@ -370,6 +433,8 @@ class PDFHelper:
         Last-resort fixed-size split with overlap.
         """
         cleaned = text.strip()
+        if not cleaned:
+            return []
         if len(cleaned) <= max_chars:
             return [cleaned]
 
