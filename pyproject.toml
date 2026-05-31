@@ -9,19 +9,16 @@ dependencies = [
     "fastapi>=0.136.3",
     "uvicorn[standard]>=0.34.0",
     "python-multipart>=0.0.20",       # required for FastAPI file-upload endpoints
-
     # Settings / env
     "pydantic-settings>=2.14.1",
-
     # PDF extraction
     "pymupdf>=1.27.2.3",
-
     # Embeddings
     "sentence-transformers>=5.5.1",
     "numpy>=2.4.6",
-
     # Vector / full-text search
     "typesense>=2.0.0",
+    "mcp>=1.27.2",
 ]
 
 [dependency-groups]
