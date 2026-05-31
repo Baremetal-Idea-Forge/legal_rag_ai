@@ -4,7 +4,7 @@ document CRUD, and search utilities for the PDF chunks collection.
 """
 
 import typesense
-from typesense.exceptions import ObjectNotFound, ObjectAlreadyExists
+from typesense.exceptions import ObjectNotFound, ObjectAlreadyExists, TypesenseClientError
 from typing import Any
 import logging
 
@@ -251,4 +251,17 @@ def search_pdf_chunks(
         params["vector_query"] = vector_query
 
     # FIX B1: use TYPESENSE_PDF_CHUNKS_COLLECTION
-    return client.collections[settings.TYPESENSE_PDF_CHUNKS_COLLECTION].documents.search(params)
+    # FIX B8: Typesense rejects GET searches whose query string exceeds 4000
+    # chars. A 1024-dim vector_query (~7 KB) blows past that limit, so route
+    # searches through POST /multi_search which carries the payload in the body.
+    search_requests = {
+        "searches": [
+            {"collection": settings.TYPESENSE_PDF_CHUNKS_COLLECTION, **params}
+        ]
+    }
+    result = client.multi_search.perform(search_requests, {})["results"][0]
+    # multi_search returns HTTP 200 even for per-search failures; surface them
+    # as a client error so the repository maps them to our domain exceptions.
+    if "error" in result:
+        raise TypesenseClientError(result["error"])
+    return result

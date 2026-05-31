@@ -64,7 +64,9 @@ def _mock_client() -> MagicMock:
     collection_resource.documents.__getitem__.return_value.update.return_value = {"id": "test"}
     collection_resource.documents.__getitem__.return_value.delete.return_value = {"id": "test"}
     collection_resource.documents.import_.return_value = [{"success": True}]
-    collection_resource.documents.search.return_value = {"hits": []}
+    # FIX B8: search now routes through client.multi_search (POST), not the
+    # per-collection documents.search (GET).
+    m.multi_search.perform.return_value = {"results": [{"hits": []}]}
     return m
 
 
@@ -454,7 +456,10 @@ class TestSearchPdfChunks:
             yield m
 
     def _last_search_params(self, mock_client) -> dict:
-        return mock_client.collections.__getitem__.return_value.documents.search.call_args[0][0]
+        # FIX B8: search_pdf_chunks calls client.multi_search.perform(
+        #   {"searches": [request]}, {}); the per-search request carries the
+        # collection name plus every search param we assert on.
+        return mock_client.multi_search.perform.call_args[0][0]["searches"][0]
 
     # --- B6 regression: mode validation ---
     def test_invalid_mode_raises(self):
@@ -571,8 +576,8 @@ class TestSearchPdfChunks:
 
     def test_uses_pdf_chunks_collection(self, mock_client):
         search_pdf_chunks("test")
-        key_used = mock_client.collections.__getitem__.call_args[0][0]
-        assert key_used == "pdf_chunks"
+        params = self._last_search_params(mock_client)
+        assert params["collection"] == "pdf_chunks"
 
     def test_valid_modes_accepted(self, mock_client):
         for mode in ("keyword", "hybrid"):
