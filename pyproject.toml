@@ -16,6 +16,12 @@ dependencies = [
     # Embeddings
     "sentence-transformers>=5.5.1",
     "numpy>=2.4.6",
+    # PyTorch — ROCm build for AMD GPU (RX 9070 XT / RDNA4 gfx1201).
+    # Pinned to the ROCm 7.0 index below; latest cp313 ROCm wheel is 2.10.0.
+    # triton-rocm is torch's companion (only on the ROCm index) — declared so
+    # the source mapping below resolves it instead of falling back to PyPI.
+    "torch==2.10.0",
+    "triton-rocm==3.6.0 ; sys_platform == 'linux'",
     # Vector / full-text search
     "typesense>=2.0.0",
     "mcp>=1.27.2",
@@ -26,6 +32,16 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-rocm" }
+# torch's ROCm build pulls triton-rocm, which only lives on the same index.
+triton-rocm = { index = "pytorch-rocm" }
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.0"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

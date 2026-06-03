@@ -5,6 +5,7 @@ Wires logging, request-ID middleware, CORS, exception handlers, routers, and a
 lifespan that ensures the Typesense collection exists at startup.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 
@@ -36,12 +37,33 @@ async def lifespan(app: FastAPI):
 
     logger.info("Ensuring Typesense collection '%s' exists…",
                 settings.TYPESENSE_PDF_CHUNKS_COLLECTION)
-    try:
-        get_typesense_repository().ensure_collection()
-        logger.info("Typesense ready.")
-    except Exception as exc:
-        # Degrade gracefully — app still serves /health; readiness reports down.
-        logger.warning("Typesense unavailable at startup: %s", exc)
+
+    # Retry to absorb the race where Typesense is still booting, then abort the
+    # app if it stays unreachable — a hard failure is louder than serving
+    # traffic that 404s on the missing collection later.
+    repo = get_typesense_repository()
+    last_exc: Exception | None = None
+    for attempt in range(1, settings.TYPESENSE_STARTUP_RETRIES + 1):
+        try:
+            repo.ensure_collection()
+            logger.info("Typesense ready.")
+            break
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "Typesense not ready (attempt %d/%d): %s",
+                attempt, settings.TYPESENSE_STARTUP_RETRIES, exc,
+            )
+            if attempt < settings.TYPESENSE_STARTUP_RETRIES:
+                await asyncio.sleep(settings.TYPESENSE_STARTUP_RETRY_DELAY)
+    else:
+        logger.error(
+            "Typesense unreachable after %d attempts — aborting boot.",
+            settings.TYPESENSE_STARTUP_RETRIES,
+        )
+        raise RuntimeError(
+            "Typesense unreachable at startup; refusing to boot."
+        ) from last_exc
 
     yield
 

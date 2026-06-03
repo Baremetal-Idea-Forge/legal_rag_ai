@@ -41,8 +41,21 @@ def get_pdf_storage_repository() -> PdfStorageRepository:
 
 @lru_cache(maxsize=1)
 def get_embedding_service() -> EmbeddingService:
-    # Model loads lazily on first embed call, not here.
-    return EmbeddingService()
+    # Model loads lazily on first embed call, not here. Wire the device/model
+    # from Settings (.env) — the helper otherwise only reads os.environ, which
+    # never sees .env-only values, so EMBEDDING_DEVICE would be ignored.
+    settings = get_settings()
+
+    def _factory():
+        from models.embeddings_model import get_embedding_helper
+
+        return get_embedding_helper(
+            model_name=settings.EMBEDDING_MODEL_NAME,
+            device=settings.EMBEDDING_DEVICE,
+            normalize_embeddings=settings.EMBEDDING_NORMALIZE,
+        )
+
+    return EmbeddingService(helper_factory=_factory)
 
 
 def get_ingestion_service(

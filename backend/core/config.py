@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     TYPESENSE_PROTOCOL: str = "http"
     TYPESENSE_API_KEY: str = "xyz"
     TYPESENSE_CONNECTION_TIMEOUT: int = 5
+    # Startup: retry ensuring the collection (handles Typesense still booting),
+    # then abort the app if still unreachable rather than degrading silently.
+    TYPESENSE_STARTUP_RETRIES: int = 5
+    TYPESENSE_STARTUP_RETRY_DELAY: float = 2.0
 
     # Collections
     # TYPESENSE_TASKS_COLLECTION kept for backward compatibility
