@@ -16,11 +16,13 @@ dependencies = [
     # Embeddings
     "sentence-transformers>=5.5.1",
     "numpy>=2.4.6",
-    # PyTorch — ROCm build for AMD GPU (RX 9070 XT / RDNA4 gfx1201).
-    # Pinned to the ROCm 7.0 index below; latest cp313 ROCm wheel is 2.10.0.
-    # triton-rocm is torch's companion (only on the ROCm index) — declared so
-    # the source mapping below resolves it instead of falling back to PyPI.
-    "torch==2.10.0",
+    # PyTorch — platform-split:
+    #   Linux  → ROCm build for AMD GPU (RX 9070 XT / RDNA4 gfx1201), pinned to
+    #            the ROCm 7.0 index below (latest cp313 ROCm wheel is 2.10.0).
+    #   macOS  → default PyPI build (ships Apple-Silicon MPS wheels).
+    # triton-rocm is torch's ROCm companion (only on the ROCm index, Linux only).
+    "torch==2.10.0 ; sys_platform == 'linux'",
+    "torch>=2.10.0 ; sys_platform == 'darwin'",
     "triton-rocm==3.6.0 ; sys_platform == 'linux'",
     # Vector / full-text search
     "typesense>=2.0.0",
@@ -34,7 +36,8 @@ dev = [
 ]
 
 [tool.uv.sources]
-torch = { index = "pytorch-rocm" }
+# Only Linux resolves torch from the ROCm index; macOS falls back to PyPI.
+torch = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
 # torch's ROCm build pulls triton-rocm, which only lives on the same index.
 triton-rocm = { index = "pytorch-rocm" }
 
