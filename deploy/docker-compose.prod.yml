@@ -1,0 +1,20 @@
+services:
+  typesense:
+    image: typesense/typesense:27.1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8108:8108"
+    volumes:
+      - /opt/legal-rag-ai/typesense-data:/data
+    command: >
+      --data-dir /data
+      --api-key=${TYPESENSE_API_KEY}
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8108/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

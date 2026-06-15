@@ -1,0 +1,20 @@
+[Unit]
+Description=Legal RAG AI Backend
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=legalrag
+Group=legalrag
+WorkingDirectory=/opt/legal-rag-ai
+EnvironmentFile=/opt/legal-rag-ai/.env
+ExecStart=/usr/local/bin/uv run uvicorn backend.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=legal-rag-backend
+
+[Install]
+WantedBy=multi-user.target
