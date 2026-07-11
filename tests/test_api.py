@@ -18,7 +18,7 @@ import main
 from core.config import Settings, get_settings
 from core.dependencies import (
     get_ingestion_service,
-    get_ollama_client,
+    get_llm_client,
     get_rag_service,
     get_search_service,
     get_typesense_repository,
@@ -134,29 +134,29 @@ def test_health_liveness(client):
 
 def test_readiness_ok(client):
     main.app.dependency_overrides[get_typesense_repository] = lambda: FakeReadyRepo(True)
-    main.app.dependency_overrides[get_ollama_client] = lambda: FakePingOllama(True)
+    main.app.dependency_overrides[get_llm_client] = lambda: FakePingOllama(True)
     r = client.get("/health/ready")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ready"
-    assert body["checks"] == {"typesense": True, "ollama": True}
+    assert body["checks"] == {"typesense": True, "llm": True}
 
 
 def test_readiness_degraded_when_typesense_down(client):
     main.app.dependency_overrides[get_typesense_repository] = lambda: FakeReadyRepo(False)
-    main.app.dependency_overrides[get_ollama_client] = lambda: FakePingOllama(True)
+    main.app.dependency_overrides[get_llm_client] = lambda: FakePingOllama(True)
     r = client.get("/health/ready")
     assert r.status_code == 503
     assert r.json()["status"] == "degraded"
     assert r.json()["checks"]["typesense"] is False
 
 
-def test_readiness_degraded_when_ollama_down(client):
+def test_readiness_degraded_when_llm_down(client):
     main.app.dependency_overrides[get_typesense_repository] = lambda: FakeReadyRepo(True)
-    main.app.dependency_overrides[get_ollama_client] = lambda: FakePingOllama(False)
+    main.app.dependency_overrides[get_llm_client] = lambda: FakePingOllama(False)
     r = client.get("/health/ready")
     assert r.status_code == 503
-    assert r.json()["checks"]["ollama"] is False
+    assert r.json()["checks"]["llm"] is False
 
 
 # --- Ingest ----------------------------------------------------------------

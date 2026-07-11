@@ -92,7 +92,10 @@ def _error_body(error_code: str, message: str, detail: object | None = None) -> 
 async def _handle_domain_error(request: Request, exc: LegalRagError) -> JSONResponse:
     # 4xx are client problems (info); 5xx are our/upstream problems (error).
     log = logger.warning if exc.status_code < 500 else logger.error
-    log("%s: %s", exc.error_code, exc.message)
+    if exc.detail is not None:
+        log("%s: %s (detail: %s)", exc.error_code, exc.message, exc.detail)
+    else:
+        log("%s: %s", exc.error_code, exc.message)
     return JSONResponse(
         status_code=exc.status_code,
         content=_error_body(exc.error_code, exc.message, exc.detail),

@@ -6,12 +6,31 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, asdict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, BinaryIO
 
 import pymupdf  # PyMuPDF
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _find_tessdata() -> str | None:
+    """Locate Tesseract's tessdata dir for PyMuPDF OCR. None → let PyMuPDF try."""
+    env = os.getenv("TESSDATA_PREFIX")
+    if env and Path(env).is_dir():
+        return env
+    for candidate in (
+        "/usr/share/tesseract-ocr/5/tessdata",
+        "/usr/share/tesseract-ocr/4.00/tessdata",
+        "/usr/share/tessdata",
+        "/usr/local/share/tessdata",
+        "/opt/homebrew/share/tessdata",
+    ):
+        if Path(candidate).is_dir():
+            return candidate
+    return None
 
 
 @dataclass
@@ -190,17 +209,9 @@ class PDFHelper:
                     text = self._normalize_text(text)
 
                     if ocr_enabled and len(text) < ocr_min_text_length:
-                        try:
-                            ocr_text = page.get_text("text", ocr=True) or ""
-                            ocr_text = self._normalize_text(ocr_text)
-                            if len(ocr_text) > len(text):
-                                logger.info(
-                                    "OCR triggered for page %d of %s (%d→%d chars)",
-                                    idx + 1, pdf_path.name, len(text), len(ocr_text),
-                                )
-                                text = ocr_text
-                        except Exception as ocr_exc:
-                            logger.warning("OCR failed for page %d: %s", idx + 1, ocr_exc)
+                        ocr_text = self._ocr_page(page, pdf_path.name, idx + 1)
+                        if len(ocr_text) > len(text):
+                            text = ocr_text
 
                     pages.append(PDFPageText(page_number=idx + 1, text=text))
         except RuntimeError as exc:
@@ -209,6 +220,29 @@ class PDFHelper:
             ) from exc
 
         return pages
+
+    @staticmethod
+    def _ocr_page(page: Any, pdf_name: str, page_no: int) -> str:
+        """OCR a single page via PyMuPDF + Tesseract. Returns "" on failure."""
+        try:
+            tp = page.get_textpage_ocr(
+                language="eng",
+                dpi=300,
+                full=True,
+                tessdata=_find_tessdata(),
+            )
+            ocr_text = page.get_text("text", textpage=tp) or ""
+            ocr_text = PDFHelper._normalize_text(ocr_text)
+            if ocr_text:
+                logger.info(
+                    "OCR page %d of %s → %d chars", page_no, pdf_name, len(ocr_text)
+                )
+            return ocr_text
+        except Exception as exc:
+            logger.warning(
+                "OCR failed for page %d of %s: %s", page_no, pdf_name, exc
+            )
+            return ""
 
     def chunk_pages(
         self,

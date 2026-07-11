@@ -54,7 +54,7 @@ class FakePdfRepo:
             size_bytes=len(pdf_bytes),
         )
 
-    def extract_pages(self, local_path):
+    def extract_pages(self, local_path, *, ocr_enabled=True, ocr_min_text_length=50):
         return [PDFPageText(i + 1, f"page {i+1} text") for i in range(self._pages)]
 
     def chunk(self, pages, *, max_chars, overlap_chars):

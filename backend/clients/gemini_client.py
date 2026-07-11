@@ -27,10 +27,19 @@ class GeminiClient:
         timeout_seconds: int = 120,
         max_retries: int = 2,
     ) -> None:
+        self._api_key = api_key
         self._model = model
         self._timeout = timeout_seconds
         self._max_retries = max_retries
-        self._client = genai.Client(api_key=api_key)
+        self._client: genai.Client | None = None
+
+    def _get_client(self) -> genai.Client:
+        # Lazy: a missing/invalid key fails on first use (caught by ping →
+        # readiness reports degraded), not at construction time (which would
+        # crash /health/ready with a 500).
+        if self._client is None:
+            self._client = genai.Client(api_key=self._api_key)
+        return self._client
 
     async def chat(
         self,
@@ -41,7 +50,7 @@ class GeminiClient:
         contents = self._to_contents(messages)
         config = types.GenerateContentConfig(temperature=temperature)
         try:
-            response = self._client.models.generate_content(
+            response = self._get_client().models.generate_content(
                 model=self._model,
                 contents=contents,
                 config=config,
@@ -53,7 +62,7 @@ class GeminiClient:
 
     async def ping(self) -> bool:
         try:
-            self._client.models.get(model=self._model)
+            self._get_client().models.get(model=self._model)
             return True
         except Exception:
             return False
@@ -67,7 +76,7 @@ class GeminiClient:
         contents = self._to_contents(messages)
         config = types.GenerateContentConfig(temperature=temperature)
         try:
-            for chunk in self._client.models.generate_content_stream(
+            for chunk in self._get_client().models.generate_content_stream(
                 model=self._model,
                 contents=contents,
                 config=config,

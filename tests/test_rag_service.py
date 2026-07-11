@@ -54,7 +54,7 @@ def _service(hits, ollama=None):
     search = FakeSearch(hits)
     ollama = ollama or FakeOllama()
     svc = RagService(
-        search_service=search, ollama_client=ollama, settings=get_settings()
+        search_service=search, llm_client=ollama, settings=get_settings()
     )
     return svc, search, ollama
 
@@ -154,7 +154,7 @@ def test_retrieval_via_mcp_uses_mcp_client_not_search():
     search = FakeSearch([])          # would yield nothing if (wrongly) used
     mcp = FakeMcp(hits)
     svc = RagService(
-        search_service=search, ollama_client=FakeOllama(),
+        search_service=search, llm_client=FakeOllama(),
         settings=_settings_with_mcp(True), mcp_client=mcp,
     )
     resp = asyncio.run(svc.answer("q"))
@@ -168,7 +168,7 @@ def test_retrieval_direct_when_flag_disabled():
     search = FakeSearch(hits)
     mcp = FakeMcp([])
     svc = RagService(
-        search_service=search, ollama_client=FakeOllama(),
+        search_service=search, llm_client=FakeOllama(),
         settings=_settings_with_mcp(False), mcp_client=mcp,
     )
     resp = asyncio.run(svc.answer("q"))
@@ -181,7 +181,7 @@ def test_flag_enabled_but_no_mcp_client_falls_back_to_search():
     hits = [_hit(0)]
     search = FakeSearch(hits)
     svc = RagService(
-        search_service=search, ollama_client=FakeOllama(),
+        search_service=search, llm_client=FakeOllama(),
         settings=_settings_with_mcp(True), mcp_client=None,
     )
     resp = asyncio.run(svc.answer("q"))
