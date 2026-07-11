@@ -111,8 +111,9 @@ echo "==> Installing backend dependencies..."
 su - "$APP_USER" -c "cd $APP_DIR && /usr/local/bin/uv sync"
 
 # --- 11. Frontend build ---
+# API_AUTH_TOKEN (from .env) is baked into the build so uploads can send X-API-Key.
 echo "==> Building frontend..."
-su - "$APP_USER" -c "cd $APP_DIR/frontend && npm ci && VITE_API_BASE_URL='https://$DOMAIN/api' npm run build"
+su - "$APP_USER" -c "cd $APP_DIR/frontend && npm ci && VITE_API_BASE_URL='https://$DOMAIN/api' VITE_API_AUTH_TOKEN='${API_AUTH_TOKEN:-}' npm run build"
 
 # --- 12. Systemd service ---
 echo "==> Installing systemd service..."
@@ -123,10 +124,17 @@ systemctl restart legal-rag-backend
 
 # --- 13. Nginx config ---
 echo "==> Configuring nginx..."
-cp deploy/nginx.conf /etc/nginx/sites-available/legal-rag-ai
-sed -i "s/YOUR_DOMAIN/$DOMAIN/g" /etc/nginx/sites-available/legal-rag-ai
-ln -sf /etc/nginx/sites-available/legal-rag-ai /etc/nginx/sites-enabled/
-rm -f /etc/nginx/sites-enabled/default
+NGINX_CONF="/etc/nginx/sites-available/legal-rag-ai"
+if [ -f "$NGINX_CONF" ] && grep -q "managed by Certbot" "$NGINX_CONF"; then
+    # Certbot has added SSL to this config — don't clobber it, or HTTPS breaks.
+    # To force a fresh nginx config, delete $NGINX_CONF and re-run certbot.
+    echo "==> nginx config already has SSL (certbot) — leaving it untouched."
+else
+    cp deploy/nginx.conf "$NGINX_CONF"
+    sed -i "s/YOUR_DOMAIN/$DOMAIN/g" "$NGINX_CONF"
+    ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/
+    rm -f /etc/nginx/sites-enabled/default
+fi
 nginx -t && systemctl reload nginx
 
 # --- 14. Health check ---

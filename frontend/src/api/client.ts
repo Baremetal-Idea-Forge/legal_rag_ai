@@ -14,6 +14,14 @@ const API_BASE = (
   import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000"
 ).replace(/\/$/, "");
 
+// Optional API key for write endpoints (/ingest). Baked in at build time via
+// VITE_API_AUTH_TOKEN; sent as X-API-Key. Empty = no header (auth disabled).
+const API_AUTH_TOKEN = import.meta.env.VITE_API_AUTH_TOKEN ?? "";
+
+function authHeaders(): Record<string, string> {
+  return API_AUTH_TOKEN ? { "X-API-Key": API_AUTH_TOKEN } : {};
+}
+
 async function throwApiError(res: Response): Promise<never> {
   let message = `Request failed (${res.status})`;
   try {
@@ -60,6 +68,9 @@ export const api = {
 
       const xhr = new XMLHttpRequest();
       xhr.open("POST", `${API_BASE}/ingest`);
+      for (const [k, v] of Object.entries(authHeaders())) {
+        xhr.setRequestHeader(k, v);
+      }
 
       xhr.upload.onprogress = (e) => {
         if (onProgress && e.lengthComputable) {
