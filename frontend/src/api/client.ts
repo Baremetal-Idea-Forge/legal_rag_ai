@@ -7,6 +7,7 @@ import type {
   IngestResponse,
   SearchMode,
   SearchResponse,
+  StorageResponse,
 } from "./types";
 
 const API_BASE = (
@@ -41,6 +42,12 @@ export const api = {
 
   async health(): Promise<HealthResponse> {
     const res = await fetch(`${API_BASE}/health`);
+    if (!res.ok) return throwApiError(res);
+    return res.json();
+  },
+
+  async storage(): Promise<StorageResponse> {
+    const res = await fetch(`${API_BASE}/health/storage`);
     if (!res.ok) return throwApiError(res);
     return res.json();
   },

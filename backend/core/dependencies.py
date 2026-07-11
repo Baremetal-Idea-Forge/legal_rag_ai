@@ -13,6 +13,7 @@ from functools import lru_cache
 from fastapi import Depends
 
 from core.config import Settings, get_settings
+from clients.gemini_client import GeminiClient
 from clients.mcp_client import McpClient
 from clients.ollama_client import OllamaClient
 from helpers.pdf_helper import PDFHelper
@@ -96,6 +97,25 @@ def get_ollama_client() -> OllamaClient:
 
 
 @lru_cache(maxsize=1)
+def get_gemini_client() -> GeminiClient:
+    settings = get_settings()
+    return GeminiClient(
+        api_key=settings.GEMINI_API_KEY,
+        model=settings.GEMINI_MODEL,
+        timeout_seconds=settings.GEMINI_TIMEOUT_SECONDS,
+        max_retries=settings.GEMINI_MAX_RETRIES,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_llm_client() -> GeminiClient | OllamaClient:
+    settings = get_settings()
+    if settings.LLM_PROVIDER == "gemini":
+        return get_gemini_client()
+    return get_ollama_client()
+
+
+@lru_cache(maxsize=1)
 def get_mcp_client() -> McpClient:
     settings = get_settings()
     return McpClient(base_url=settings.MCP_SERVER_URL)
@@ -104,12 +124,12 @@ def get_mcp_client() -> McpClient:
 def get_rag_service(
     settings: Settings = Depends(get_settings),
     search_service: SearchService = Depends(get_search_service),
-    ollama_client: OllamaClient = Depends(get_ollama_client),
+    llm_client: GeminiClient | OllamaClient = Depends(get_llm_client),
     mcp_client: McpClient = Depends(get_mcp_client),
 ) -> RagService:
     return RagService(
         search_service=search_service,
-        ollama_client=ollama_client,
+        llm_client=llm_client,
         settings=settings,
         mcp_client=mcp_client,
     )

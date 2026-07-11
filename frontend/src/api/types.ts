@@ -53,6 +53,22 @@ export interface HealthResponse {
   version: string;
 }
 
+export interface PdfStorageInfo {
+  num_files: number;
+  total_size_bytes: number;
+  total_size_human: string;
+}
+
+export interface StorageResponse {
+  typesense_data_dir: string;
+  disk_used_bytes: number;
+  disk_used_human: string;
+  disk_total_bytes: number;
+  disk_total_human: string;
+  disk_used_pct: number;
+  pdf_storage: PdfStorageInfo;
+}
+
 // Backend error envelope: core/exceptions.py
 export interface ApiError {
   error: string;

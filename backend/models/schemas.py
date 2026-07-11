@@ -108,3 +108,23 @@ class ReadinessResponse(BaseModel):
     status: str
     version: str
     checks: dict[str, bool]
+
+
+# ---------------------------------------------------------------------------
+# Storage monitoring
+# ---------------------------------------------------------------------------
+
+class PdfStorageInfo(BaseModel):
+    num_files: int
+    total_size_bytes: int
+    total_size_human: str
+
+
+class StorageResponse(BaseModel):
+    typesense_data_dir: str
+    disk_used_bytes: int
+    disk_used_human: str
+    disk_total_bytes: int
+    disk_total_human: str
+    disk_used_pct: float
+    pdf_storage: PdfStorageInfo

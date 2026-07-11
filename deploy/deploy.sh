@@ -43,11 +43,14 @@ if ! command -v node &>/dev/null; then
     apt-get install -y -qq nodejs
 fi
 
-# --- 4. uv (if not installed) ---
+# --- 4. uv (install system-wide to /usr/local/bin) ---
 if ! command -v uv &>/dev/null; then
     echo "==> Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
+    curl -LsSf https://astral.sh/uv/install.sh | env INSTALLER_NO_MODIFY_PATH=1 sh
+    cp "$HOME/.local/bin/uv" /usr/local/bin/uv
+    cp "$HOME/.local/bin/uvx" /usr/local/bin/uvx
+else
+    echo "==> uv already installed at $(command -v uv)"
 fi
 
 # --- 5. App user ---
@@ -82,22 +85,34 @@ if [ ! -f "$APP_DIR/.env" ]; then
     exit 1
 fi
 
-# --- 8. Typesense data directory ---
+# Source .env for all subsequent steps
+set -a; source "$APP_DIR/.env"; set +a
+
+# Resolve domain: DEPLOY_DOMAIN from .env, or fallback
+DOMAIN="${DEPLOY_DOMAIN:-localhost}"
+if [ "$DOMAIN" = "localhost" ] || [ "$DOMAIN" = "your-domain.com" ]; then
+    echo "WARNING: DEPLOY_DOMAIN is not set in .env (got '$DOMAIN')."
+    echo "         Frontend will be built with localhost API URL."
+    echo "         Set DEPLOY_DOMAIN in .env and re-run to fix."
+fi
+echo "==> Using domain: $DOMAIN"
+
+# --- 8. Ownership + Typesense data directory ---
 mkdir -p "$APP_DIR/typesense-data"
-chown -R "$APP_USER:$APP_USER" "$APP_DIR/typesense-data"
+mkdir -p "$APP_DIR/storage/pdfs"
+chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 
 # --- 9. Start Typesense ---
 echo "==> Starting Typesense..."
-docker compose -f deploy/docker-compose.prod.yml up -d
+docker compose -f deploy/docker-compose.prod.yml --env-file "$APP_DIR/.env" up -d
 
 # --- 10. Backend dependencies ---
 echo "==> Installing backend dependencies..."
-su - "$APP_USER" -c "cd $APP_DIR && uv sync"
+su - "$APP_USER" -c "cd $APP_DIR && /usr/local/bin/uv sync"
 
 # --- 11. Frontend build ---
 echo "==> Building frontend..."
-DOMAIN=$(grep -oP '(?<=server_name )\S+' /etc/nginx/sites-enabled/legal-rag-ai 2>/dev/null || echo "localhost")
-su - "$APP_USER" -c "cd $APP_DIR/frontend && npm ci && VITE_API_BASE_URL=https://$DOMAIN/api npm run build"
+su - "$APP_USER" -c "cd $APP_DIR/frontend && npm ci && VITE_API_BASE_URL='https://$DOMAIN/api' npm run build"
 
 # --- 12. Systemd service ---
 echo "==> Installing systemd service..."
@@ -109,14 +124,12 @@ systemctl restart legal-rag-backend
 # --- 13. Nginx config ---
 echo "==> Configuring nginx..."
 cp deploy/nginx.conf /etc/nginx/sites-available/legal-rag-ai
+sed -i "s/YOUR_DOMAIN/$DOMAIN/g" /etc/nginx/sites-available/legal-rag-ai
 ln -sf /etc/nginx/sites-available/legal-rag-ai /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 
-# --- 14. Ownership ---
-chown -R "$APP_USER:$APP_USER" "$APP_DIR"
-
-# --- 15. Health check ---
+# --- 14. Health check ---
 echo "==> Waiting for backend to start..."
 sleep 5
 if curl -sf http://127.0.0.1:8000/health > /dev/null; then
@@ -127,12 +140,9 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  Deploy complete!"
+echo "  Deploy complete!  Domain: $DOMAIN"
 echo ""
-echo "  Next steps:"
-echo "  1. Edit /etc/nginx/sites-available/legal-rag-ai"
-echo "     Replace YOUR_DOMAIN with your actual domain"
-echo "  2. sudo certbot --nginx -d YOUR_DOMAIN"
-echo "  3. Uncomment the HTTPS block in nginx config"
-echo "  4. sudo nginx -t && sudo systemctl reload nginx"
+echo "  Next steps (if not done already):"
+echo "  1. sudo certbot --nginx -d $DOMAIN"
+echo "  2. sudo nginx -t && sudo systemctl reload nginx"
 echo "============================================================"

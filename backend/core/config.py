@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
 
+    # -- Deployment ------------------------------------------------------------
+    DEPLOY_DOMAIN: str = "localhost"
+
     # -- Typesense (vector + keyword hybrid search) -------------------------
     TYPESENSE_HOST: str = "localhost"
     TYPESENSE_PORT: int = 8108
@@ -41,11 +44,28 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = 1024              # must equal schema num_dim
     EMBEDDING_NORMALIZE: bool = True
 
-    # -- LLM (Gemma 3 4B via Ollama, OpenAI-compatible HTTP API) ------------
+    # -- LLM provider switch ---------------------------------------------------
+    LLM_PROVIDER: str = "gemini"  # "gemini" | "ollama"
+
+    # -- Gemini API ------------------------------------------------------------
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_TIMEOUT_SECONDS: int = 120
+    GEMINI_MAX_RETRIES: int = 2
+
+    # -- Ollama (local dev) ----------------------------------------------------
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "gemma3:4b"
     OLLAMA_TIMEOUT_SECONDS: int = 120
     OLLAMA_MAX_RETRIES: int = 2
+
+    # -- OCR (PyMuPDF + Tesseract) ---------------------------------------------
+    OCR_ENABLED: bool = True
+    OCR_MIN_TEXT_LENGTH: int = 50
+
+    # -- Storage monitoring ----------------------------------------------------
+    TYPESENSE_DATA_DIR: str = "typesense-data"
+    DISK_QUOTA_GB: int = 80
 
     # -- MCP server (read-side retrieval tool provider) ---------------------
     MCP_SERVER_URL: str = "http://localhost:9000"

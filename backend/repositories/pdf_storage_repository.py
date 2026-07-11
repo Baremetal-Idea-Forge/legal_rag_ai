@@ -34,10 +34,19 @@ class PdfStorageRepository:
                 f"Failed to store PDF '{original_filename}'.", detail=str(exc)
             ) from exc
 
-    def extract_pages(self, local_path: str) -> list[PDFPageText]:
-        # extract_pages raises ValueError for corrupted/unsupported PDFs.
+    def extract_pages(
+        self,
+        local_path: str,
+        *,
+        ocr_enabled: bool = True,
+        ocr_min_text_length: int = 50,
+    ) -> list[PDFPageText]:
         try:
-            return self._helper.extract_pages(local_path)
+            return self._helper.extract_pages(
+                local_path,
+                ocr_enabled=ocr_enabled,
+                ocr_min_text_length=ocr_min_text_length,
+            )
         except (ValueError, FileNotFoundError) as exc:
             raise IngestionError(
                 f"Failed to read PDF at '{local_path}'.", detail=str(exc)

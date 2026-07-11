@@ -49,7 +49,11 @@ class IngestionService:
             pdf_bytes=pdf_bytes, original_filename=filename, pdf_id=sha
         )
 
-        pages = self._pdf_repo.extract_pages(stored.local_path)
+        pages = self._pdf_repo.extract_pages(
+            stored.local_path,
+            ocr_enabled=self._settings.OCR_ENABLED,
+            ocr_min_text_length=self._settings.OCR_MIN_TEXT_LENGTH,
+        )
         chunks = self._pdf_repo.chunk(
             pages,
             max_chars=self._settings.CHUNK_MAX_CHARS,

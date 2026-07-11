@@ -13,17 +13,12 @@ dependencies = [
     "pydantic-settings>=2.14.1",
     # PDF extraction
     "pymupdf>=1.27.2.3",
+    # LLM providers
+    "google-genai>=1.0.0",
     # Embeddings
     "sentence-transformers>=5.5.1",
     "numpy>=2.4.6",
-    # PyTorch — platform-split:
-    #   Linux  → ROCm build for AMD GPU (RX 9070 XT / RDNA4 gfx1201), pinned to
-    #            the ROCm 7.0 index below (latest cp313 ROCm wheel is 2.10.0).
-    #   macOS  → default PyPI build (ships Apple-Silicon MPS wheels).
-    # triton-rocm is torch's ROCm companion (only on the ROCm index, Linux only).
-    "torch==2.10.0 ; sys_platform == 'linux'",
-    "torch>=2.10.0 ; sys_platform == 'darwin'",
-    "triton-rocm==3.6.0 ; sys_platform == 'linux'",
+    "torch>=2.10.0",
     # Vector / full-text search
     "typesense>=2.0.0",
     "mcp>=1.27.2",
@@ -34,17 +29,6 @@ dev = [
     "pytest>=9.0.3",
     "pytest-cov>=7.1.0",
 ]
-
-[tool.uv.sources]
-# Only Linux resolves torch from the ROCm index; macOS falls back to PyPI.
-torch = [{ index = "pytorch-rocm", marker = "sys_platform == 'linux'" }]
-# torch's ROCm build pulls triton-rocm, which only lives on the same index.
-triton-rocm = { index = "pytorch-rocm" }
-
-[[tool.uv.index]]
-name = "pytorch-rocm"
-url = "https://download.pytorch.org/whl/rocm7.0"
-explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -165,9 +165,16 @@ class PDFHelper:
             pdf_id=pdf_id,
         )
 
-    def extract_pages(self, pdf_path: str | Path) -> list[PDFPageText]:
+    def extract_pages(
+        self,
+        pdf_path: str | Path,
+        *,
+        ocr_enabled: bool = True,
+        ocr_min_text_length: int = 50,
+    ) -> list[PDFPageText]:
         """
         Extract text from each page of the PDF.
+        Falls back to OCR (Tesseract via PyMuPDF) when a page yields too little text.
         Page numbers are 1-based.
         """
         pdf_path = Path(pdf_path)
@@ -181,6 +188,20 @@ class PDFHelper:
                     page = doc.load_page(idx)
                     text = page.get_text("text") or ""
                     text = self._normalize_text(text)
+
+                    if ocr_enabled and len(text) < ocr_min_text_length:
+                        try:
+                            ocr_text = page.get_text("text", ocr=True) or ""
+                            ocr_text = self._normalize_text(ocr_text)
+                            if len(ocr_text) > len(text):
+                                logger.info(
+                                    "OCR triggered for page %d of %s (%d→%d chars)",
+                                    idx + 1, pdf_path.name, len(text), len(ocr_text),
+                                )
+                                text = ocr_text
+                        except Exception as ocr_exc:
+                            logger.warning("OCR failed for page %d: %s", idx + 1, ocr_exc)
+
                     pages.append(PDFPageText(page_number=idx + 1, text=text))
         except RuntimeError as exc:
             raise ValueError(

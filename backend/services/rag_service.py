@@ -16,7 +16,6 @@ from typing import Any, AsyncIterator
 from starlette.concurrency import run_in_threadpool
 
 from clients.mcp_client import McpClient
-from clients.ollama_client import OllamaClient
 from core.config import Settings
 from models.schemas import ChatResponse, Citation, ChunkHit
 from services import prompts
@@ -30,12 +29,12 @@ class RagService:
         self,
         *,
         search_service: SearchService,
-        ollama_client: OllamaClient,
+        llm_client: Any,
         settings: Settings,
         mcp_client: McpClient | None = None,
     ) -> None:
         self._search = search_service
-        self._ollama = ollama_client
+        self._llm = llm_client
         self._settings = settings
         self._mcp = mcp_client
 
@@ -50,7 +49,7 @@ class RagService:
             )
 
         messages = prompts.build_messages(query, prompts.format_context(used))
-        answer_text = await self._ollama.chat(messages)
+        answer_text = await self._llm.chat(messages)
 
         return ChatResponse(
             query=query,
@@ -75,7 +74,7 @@ class RagService:
             return
 
         messages = prompts.build_messages(query, prompts.format_context(used))
-        async for token in self._ollama.stream_chat(messages):
+        async for token in self._llm.stream_chat(messages):
             yield {"type": "token", "data": token}
         yield {
             "type": "citations",
