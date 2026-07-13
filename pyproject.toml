@@ -30,6 +30,18 @@ dev = [
     "pytest-cov>=7.1.0",
 ]
 
+[tool.uv.sources]
+# Linux: pull the CPU-only torch build from PyTorch's CPU index. The default
+# Linux wheel on PyPI is the CUDA build (+cuXXX), which drags in `triton` and
+# crashes on import on a GPU-less VPS. The +cpu build has no CUDA/triton and is
+# ~200MB instead of ~2.5GB. macOS falls back to the default PyPI wheel (CPU/MPS).
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts   = "-v --tb=short"
