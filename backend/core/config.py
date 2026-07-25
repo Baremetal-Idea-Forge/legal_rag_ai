@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     # -- LLM provider switch ---------------------------------------------------
     LLM_PROVIDER: str = "gemini"  # "gemini" | "ollama"
 
+    # Sampling temperature for grounded answers. 0.0 = deterministic: the same
+    # context yields the same answer every time (fixes intermittent refusals).
+    LLM_TEMPERATURE: float = 0.0
+
     # -- Gemini API ------------------------------------------------------------
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"

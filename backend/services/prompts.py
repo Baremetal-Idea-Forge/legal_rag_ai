@@ -8,7 +8,11 @@ primary defence against hallucination in a high-stakes legal domain.
 
 from __future__ import annotations
 
+import logging
+
 from models.schemas import ChunkHit
+
+logger = logging.getLogger(__name__)
 
 # Returned verbatim when retrieval yields no usable context.
 NO_CONTEXT_ANSWER = (
@@ -23,9 +27,11 @@ Rules:
 1. Use ONLY the information in the CONTEXT. Do not rely on outside knowledge.
 2. Cite the source for every claim using the inline form [pdf_name p.N] that \
 appears in the context headers.
-3. If the CONTEXT does not contain the answer, reply exactly: \
-"I could not find information about that in the available legal documents." \
-Do not guess or fabricate.
+3. If the CONTEXT contains material relevant to the question, answer from it — \
+even when it only partially addresses the question. Reply "I could not find \
+information about that in the available legal documents." ONLY when the CONTEXT \
+has nothing at all on the subject. Do not guess or fabricate, but do not refuse \
+when relevant text is present.
 4. Quote statutory language precisely; do not paraphrase section numbers.
 5. Be concise and neutral. Do not give legal advice — report what the \
 documents say."""
@@ -46,12 +52,28 @@ def select_hits_within(hits: list[ChunkHit], *, max_chars: int) -> list[ChunkHit
     """
     selected: list[ChunkHit] = []
     used = 0
-    for hit in hits:
+    for i, hit in enumerate(hits):
         block_len = len(f"[{hit.pdf_name} {_page_ref(hit)}]\n{hit.content}")
         if selected and used + block_len > max_chars:
+            logger.debug(
+                "Context limit hit at chunk %d (%s): %d + %d > %d (max_chars)",
+                i, hit.pdf_name, used, block_len, max_chars,
+            )
             break
         selected.append(hit)
         used += block_len
+        logger.debug(
+            "Selected chunk %d (%s p.%s, idx=%d): %d chars, cumulative=%d/%d",
+            i, hit.pdf_name, _page_ref(hit), hit.chunk_index, block_len, used, max_chars,
+        )
+
+    if len(selected) < len(hits):
+        dropped = len(hits) - len(selected)
+        logger.info(
+            "Context selection: %d/%d chunks kept (dropped %d due to char limit)",
+            len(selected), len(hits), dropped,
+        )
+
     return selected
 
 

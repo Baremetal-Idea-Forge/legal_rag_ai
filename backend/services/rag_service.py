@@ -48,8 +48,28 @@ class RagService:
                 query=query, answer=prompts.NO_CONTEXT_ANSWER, citations=[], chunks_used=[]
             )
 
-        messages = prompts.build_messages(query, prompts.format_context(used))
-        answer_text = await self._llm.chat(messages)
+        # Log retrieved context details for debugging
+        logger.debug(
+            "Retrieved %d chunks for query '%s': %s",
+            len(used),
+            query[:60],
+            [
+                {"pdf_name": h.pdf_name, "chunk_idx": h.chunk_index, "score": h.score}
+                for h in used
+            ],
+        )
+
+        context_text = prompts.format_context(used)
+        logger.debug("Context size: %d chars, %d lines", len(context_text), context_text.count("\n"))
+
+        messages = prompts.build_messages(query, context_text)
+        logger.debug("Sending to LLM - system msg: %d chars, user msg: %d chars",
+                    len(messages[0]["content"]), len(messages[1]["content"]))
+
+        answer_text = await self._llm.chat(
+            messages, temperature=self._settings.LLM_TEMPERATURE
+        )
+        logger.debug("LLM response: %s", answer_text[:100])
 
         return ChatResponse(
             query=query,
@@ -69,12 +89,26 @@ class RagService:
         """
         used = await self._retrieve_context(query, top_k)
         if not used:
+            logger.info("No context for streaming query '%s' — declining.", query[:60])
             yield {"type": "token", "data": prompts.NO_CONTEXT_ANSWER}
             yield {"type": "citations", "data": []}
             return
 
-        messages = prompts.build_messages(query, prompts.format_context(used))
-        async for token in self._llm.stream_chat(messages):
+        logger.debug(
+            "Streaming %d chunks for query '%s': %s",
+            len(used),
+            query[:60],
+            [{"pdf_name": h.pdf_name, "chunk_idx": h.chunk_index, "score": h.score} for h in used],
+        )
+
+        context_text = prompts.format_context(used)
+        messages = prompts.build_messages(query, context_text)
+        logger.debug("Streaming - context: %d chars, user msg: %d chars",
+                    len(context_text), len(messages[1]["content"]))
+
+        async for token in self._llm.stream_chat(
+            messages, temperature=self._settings.LLM_TEMPERATURE
+        ):
             yield {"type": "token", "data": token}
         yield {
             "type": "citations",
@@ -98,9 +132,17 @@ class RagService:
             )
             hits = result.hits
 
-        return prompts.select_hits_within(
+        selected = prompts.select_hits_within(
             hits, max_chars=self._settings.RAG_MAX_CONTEXT_CHARS
         )
+        logger.info(
+            "Retrieved %d → selected %d (max_chars=%s) for query '%s'",
+            len(hits),
+            len(selected),
+            self._settings.RAG_MAX_CONTEXT_CHARS,
+            query[:60],
+        )
+        return selected
 
     @staticmethod
     def _to_citation(hit: ChunkHit) -> Citation:

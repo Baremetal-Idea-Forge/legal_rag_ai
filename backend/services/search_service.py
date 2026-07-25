@@ -47,6 +47,9 @@ class SearchService:
         vector_query: str | None = None
         if mode in _VECTOR_MODES:
             embedding = self._embeddings.embed_query(query)
+            # Log embedding size for debugging
+            logger.debug("Query embedding: %d dims, first 3 values: %.6f, %.6f, %.6f",
+                        len(embedding), embedding[0], embedding[1], embedding[2])
             vector_query = self._build_vector_query(embedding, top_k)
 
         raw = self._typesense.search(
@@ -59,6 +62,15 @@ class SearchService:
 
         hits = [self._to_hit(h) for h in raw.get("hits", [])]
         logger.info("Search '%s' (%s) → %d hits", query[:60], mode, len(hits))
+
+        # Log detailed scores for each hit
+        for i, hit in enumerate(hits[:5]):
+            logger.debug(
+                "  Hit %d: %s (chunk %d, score=%.4f, text_match=%s, vector_dist=%s)",
+                i + 1, hit.pdf_name, hit.chunk_index, hit.score or 0.0,
+                hit.text_match, hit.vector_distance,
+            )
+
         return SearchResponse(query=query, mode=mode, count=len(hits), hits=hits)
 
     @staticmethod

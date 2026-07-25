@@ -76,6 +76,14 @@ class TestBuildMessages:
         msgs = prompts.build_messages("q", "c")
         assert "ONLY" in msgs[0]["content"]
 
+    def test_system_prompt_answers_when_relevant_context_present(self):
+        # Guards against the intermittent false-refusal bug: the prompt must
+        # instruct the model to answer from relevant context, not decline.
+        system = prompts.build_messages("q", "c")[0]["content"]
+        assert "do not refuse when relevant text is present" in system.lower()
+        # The exact refusal string is still available for genuinely-absent topics.
+        assert "could not find information" in system.lower()
+
 
 def test_no_context_answer_constant():
     assert "could not find" in prompts.NO_CONTEXT_ANSWER.lower()

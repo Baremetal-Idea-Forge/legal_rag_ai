@@ -46,9 +46,17 @@ class OllamaClient:
     ) -> str:
         """Non-streaming chat completion → assistant message content."""
         payload = self._payload(messages, temperature, stream=False)
+        logger.debug(
+            "Ollama chat request - model=%s, temp=%.2f, msg_count=%d, msg_sizes=%s",
+            self._model, temperature, len(messages),
+            [len(m.get("content", "")) for m in messages],
+        )
         data = await self._post_with_retries("/api/chat", payload)
         try:
-            return data["message"]["content"]
+            response_text = data["message"]["content"]
+            logger.debug("Ollama response: %d chars, first 100: %s",
+                        len(response_text), response_text[:100])
+            return response_text
         except (KeyError, TypeError) as exc:
             raise LLMError("Malformed response from Ollama.", detail=str(exc)) from exc
 
@@ -70,6 +78,11 @@ class OllamaClient:
         """Streaming chat completion → yields content tokens as they arrive."""
         payload = self._payload(messages, temperature, stream=True)
         url = f"{self._base_url}/api/chat"
+        logger.debug(
+            "Ollama stream request - model=%s, temp=%.2f, msg_count=%d",
+            self._model, temperature, len(messages),
+        )
+        token_count = 0
         try:
             async with self._client() as client:
                 async with client.stream("POST", url, json=payload) as resp:
@@ -80,8 +93,10 @@ class OllamaClient:
                         chunk = json.loads(line)
                         token = chunk.get("message", {}).get("content")
                         if token:
+                            token_count += len(token)
                             yield token
                         if chunk.get("done"):
+                            logger.debug("Ollama stream complete - %d chars received", token_count)
                             break
         except (httpx.HTTPError, json.JSONDecodeError) as exc:
             logger.error("Ollama stream failed: %s", exc)

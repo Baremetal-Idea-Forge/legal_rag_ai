@@ -35,9 +35,11 @@ class FakeOllama:
     async def chat(self, messages, *, temperature=0.2):
         self.chat_calls += 1
         self._last_messages = messages
+        self.last_temperature = temperature
         return self._answer
 
     async def stream_chat(self, messages, *, temperature=0.2):
+        self.last_temperature = temperature
         for t in self._tokens:
             yield t
 
@@ -82,6 +84,30 @@ def test_answer_no_hits_declines_without_calling_llm():
     assert resp.citations == []
     assert resp.chunks_used == []
     assert ollama.chat_calls == 0  # no hallucination path
+
+
+def test_answer_forwards_configured_temperature():
+    # Deterministic answers: RagService must pass settings.LLM_TEMPERATURE
+    # (not the client's own 0.2 default) to the LLM.
+    settings = Settings()
+    settings.LLM_TEMPERATURE = 0.0
+    ollama = FakeOllama()
+    svc = RagService(
+        search_service=FakeSearch([_hit(0)]), llm_client=ollama, settings=settings
+    )
+    asyncio.run(svc.answer("q"))
+    assert ollama.last_temperature == 0.0
+
+
+def test_stream_forwards_configured_temperature():
+    settings = Settings()
+    settings.LLM_TEMPERATURE = 0.0
+    ollama = FakeOllama()
+    svc = RagService(
+        search_service=FakeSearch([_hit(0)]), llm_client=ollama, settings=settings
+    )
+    _collect(svc.stream_answer("q"))
+    assert ollama.last_temperature == 0.0
 
 
 def test_answer_passes_context_to_llm():

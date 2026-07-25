@@ -49,13 +49,21 @@ class GeminiClient:
     ) -> str:
         contents = self._to_contents(messages)
         config = types.GenerateContentConfig(temperature=temperature)
+        logger.debug(
+            "Gemini chat request - model=%s, temp=%.2f, msg_count=%d, msg_sizes=%s",
+            self._model, temperature, len(messages),
+            [len(m.get("content", "")) for m in messages],
+        )
         try:
             response = self._get_client().models.generate_content(
                 model=self._model,
                 contents=contents,
                 config=config,
             )
-            return response.text or ""
+            response_text = response.text or ""
+            logger.debug("Gemini response: %d chars, first 100: %s",
+                        len(response_text), response_text[:100])
+            return response_text
         except Exception as exc:
             logger.error("Gemini chat failed: %s", exc)
             raise LLMError("Gemini API request failed.", detail=str(exc)) from exc
@@ -75,6 +83,11 @@ class GeminiClient:
     ) -> AsyncIterator[str]:
         contents = self._to_contents(messages)
         config = types.GenerateContentConfig(temperature=temperature)
+        logger.debug(
+            "Gemini stream request - model=%s, temp=%.2f, msg_count=%d",
+            self._model, temperature, len(messages),
+        )
+        token_count = 0
         try:
             for chunk in self._get_client().models.generate_content_stream(
                 model=self._model,
@@ -82,7 +95,9 @@ class GeminiClient:
                 config=config,
             ):
                 if chunk.text:
+                    token_count += len(chunk.text)
                     yield chunk.text
+            logger.debug("Gemini stream complete - %d chars received", token_count)
         except Exception as exc:
             logger.error("Gemini stream failed: %s", exc)
             raise LLMError("Gemini streaming failed.", detail=str(exc)) from exc
