@@ -880,3 +880,94 @@ class TestRealPDFs:
         for c in chunks:
             assert "\r" not in c.content, \
                 f"CR in chunk {c.chunk_index} page {c.page_start}"
+
+
+# ===========================================================================
+# 11. Structure-aware (legal) chunking — the retrieval-precision fix
+# ===========================================================================
+
+class TestStructuralChunking:
+    """Each Article/Section must land in its own chunk instead of a page-blob."""
+
+    FOUR_ARTICLES = (
+        "Article 19. Freedom of speech. "
+        "All citizens shall have the right to freedom of speech and expression.\n"
+        "Article 20. Protection for offences. "
+        "No person shall be convicted except for violation of a law in force.\n"
+        "Article 21. Protection of life and personal liberty. "
+        "No person shall be deprived of his life or personal liberty except "
+        "according to procedure established by law.\n"
+        "Article 22. Protection against arrest. "
+        "No arrested person shall be detained without being informed of the grounds."
+    )
+
+    def _art21_chunk(self, chunks: list[PDFChunk]) -> PDFChunk:
+        matches = [c for c in chunks if "life or personal liberty" in c.content]
+        assert len(matches) == 1, f"Article 21 not isolated: {len(matches)} chunks"
+        return matches[0]
+
+    def test_each_article_is_its_own_chunk(self):
+        pages = make_pages(self.FOUR_ARTICLES)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=1200, overlap_chars=150)
+        assert len(chunks) == 4
+        assert chunk_indices_sequential(chunks)
+
+    def test_article_21_isolated_from_neighbours(self):
+        # The core regression: querying Article 21 must not surface a blob that
+        # also contains Articles 19/20/22.
+        pages = make_pages(self.FOUR_ARTICLES)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=1200, overlap_chars=150)
+        c21 = self._art21_chunk(chunks)
+        assert "Article 21" in c21.content
+        assert "freedom of speech" not in c21.content   # Article 19
+        assert "detained without" not in c21.content     # Article 22
+
+    def test_provision_continuation_across_pages_stays_one_chunk(self):
+        # Article 21 starts on page 1 and continues onto page 2 before Article 22.
+        page1 = "Article 21. Protection of life and personal liberty. No person shall be deprived of his life"
+        page2 = (
+            "or personal liberty except according to procedure established by law.\n"
+            "Article 22. Protection against arrest and detention."
+        )
+        pages = [PDFPageText(1, page1), PDFPageText(2, page2)]
+        chunks = PDFHelper().chunk_pages(pages, max_chars=1200, overlap_chars=150)
+        matches = [c for c in chunks if "Protection of life and personal liberty" in c.content]
+        assert len(matches) == 1, f"Article 21 not isolated: {len(matches)} chunks"
+        c21 = matches[0]
+        assert c21.page_start == 1 and c21.page_end == 2
+        assert "procedure established by law" in c21.content   # the continuation
+        assert "arrest and detention" not in c21.content        # Article 22 stays out
+
+    def test_no_headings_falls_back_to_size_accumulation(self):
+        # Regression: heading-less text still merges short pages (old behaviour).
+        pages = make_pages("Plain one.", "Plain two.", "Plain three.")
+        chunks = PDFHelper().chunk_pages(pages, max_chars=1200, overlap_chars=0)
+        assert len(chunks) == 1
+        assert chunks[0].page_start == 1 and chunks[0].page_end == 3
+
+    def test_long_article_split_keeps_heading_on_every_piece(self):
+        long_article = (
+            "Article 42. Just and humane conditions of work. "
+            + "The State shall make provision for securing conditions of work. " * 40
+        )
+        pages = make_pages(long_article)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=1000, overlap_chars=100)
+        assert len(chunks) >= 2
+        assert all(len(c.content) <= 1000 for c in chunks)
+        assert all("Article 42" in c.content for c in chunks)
+
+    def test_bare_numbered_provisions_detected(self):
+        # Constitution-style "21. Title.—text" (no "Article" keyword).
+        text = (
+            "20. Protection for offences. Clause text here.\n"
+            "21. Protection of life and personal liberty. No person shall be deprived."
+        )
+        segments = PDFHelper._segment_pages([PDFPageText(1, text)])
+        headings = [s for s in segments if s[2]]
+        assert len(headings) == 2
+
+    def test_cross_reference_and_plural_not_treated_as_heading(self):
+        # Plurals and mid-line references must NOT create provision boundaries.
+        text = "Articles 12 to 35 are fundamental rights guaranteed under Section 3 here."
+        segments = PDFHelper._segment_pages([PDFPageText(1, text)])
+        assert segments == [(text, 1, False)]

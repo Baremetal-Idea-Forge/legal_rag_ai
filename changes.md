@@ -2,6 +2,40 @@
 
 Version-wise record of notable changes.
 
+## 0.0.3
+
+**Improve semantic search: structure-aware (legal) chunking + a retrieval eval harness.**
+
+The chunker merged consecutive pages into 3,500-char blobs, so a single chunk
+spanned many Articles/Sections. Each chunk's embedding was a blurry average of
+unrelated provisions, capping retrieval precision — a query for "Article 21"
+landed in a smear of the surrounding articles. This splits on legal structure so
+one provision ≈ one chunk.
+
+### Changed
+- **Structure-aware chunking** (`helpers/pdf_helper.py`). `chunk_pages` now
+  segments each page on Article/Section headings (`_HEADING_RE`): a heading-led
+  segment starts a fresh chunk, trailing text (a provision continuing onto the
+  next page) is appended, and oversized provisions sub-split with the heading
+  re-stated on each continuation piece so every chunk stays citable. Heading-less
+  text degrades to the previous size-based accumulation (unchanged), so
+  non-legal PDFs behave as before.
+- **Smaller chunk budget** to keep per-provision embeddings sharp:
+  `CHUNK_MAX_CHARS` 3500 → 1200, `CHUNK_OVERLAP_CHARS` 400 → 150
+  (`core/config.py`, documented in `.env.example`). **Re-ingest after upgrading.**
+
+### Added
+- **Retrieval eval harness** (`tests/eval/`): dependency-free `metrics.py`
+  (Hit@k, MRR@k, Recall@k with re-chunk-robust substring relevance), a
+  `golden_set.json` template, and `run_eval.py` to score the live search stack
+  before/after each retrieval change — so tuning is measured, not guessed.
+- Unit tests: structural chunking (`TestStructuralChunking` — Article isolation,
+  cross-page continuation, heading-less fallback, oversized-provision prefixing,
+  heading-regex boundaries) and the eval metrics (`tests/eval/test_metrics.py`).
+
+### Tests
+- `pytest`: 500 passed, 1 skipped (+19 new; corpus-dependent count).
+
 ## 0.0.2
 
 **Fix: intermittent LLM refusals ("I cannot answer" while citing sources).**

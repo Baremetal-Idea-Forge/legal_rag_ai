@@ -85,8 +85,11 @@ class Settings(BaseSettings):
     # helpers/pdf_helper.py.
     PDF_STORAGE_DIR: str = "storage/pdfs"
     PDF_PUBLIC_BASE_URL: str = ""
-    CHUNK_MAX_CHARS: int = 3500
-    CHUNK_OVERLAP_CHARS: int = 400
+    # Chunks are split on Article/Section boundaries (one provision per chunk).
+    # A smaller cap keeps each provision's embedding sharp; oversized provisions
+    # sub-split with overlap. Re-ingest after changing these.
+    CHUNK_MAX_CHARS: int = 1200
+    CHUNK_OVERLAP_CHARS: int = 150
 
     # -- Uploads ------------------------------------------------------------
     MAX_UPLOAD_BYTES: int = 50 * 1024 * 1024      # 50 MB

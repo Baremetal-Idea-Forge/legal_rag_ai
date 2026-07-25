@@ -1,0 +1,22 @@
+{
+  "description": "Retrieval golden set. Each query lists substrings that MUST appear in the retrieved chunks for retrieval to be correct. These entries are ILLUSTRATIVE (Indian Constitution) and MUST be verified/extended against your own indexed corpus before the numbers mean anything. Aim for 30-50 real queries.",
+  "k": 5,
+  "queries": [
+    {
+      "query": "What does Article 21 guarantee?",
+      "expected": ["Article 21", "life or personal liberty"]
+    },
+    {
+      "query": "Which article ensures equality before the law?",
+      "expected": ["Article 14", "equality before the law"]
+    },
+    {
+      "query": "What is the right to freedom of speech and expression?",
+      "expected": ["Article 19", "freedom of speech"]
+    },
+    {
+      "query": "What remedy does Article 32 provide?",
+      "expected": ["Article 32", "constitutional remedies"]
+    }
+  ]
+}

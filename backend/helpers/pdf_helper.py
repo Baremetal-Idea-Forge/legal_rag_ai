@@ -14,6 +14,19 @@ import pymupdf  # PyMuPDF
 
 logger = logging.getLogger(__name__)
 
+# A legal-provision boundary at the start of a line (post-normalisation):
+#   "Article 21", "ARTICLE 21A", "Art. 370", "Section 302", "Sec 9", or a bare
+#   "21. Title" as rendered in bare-numbered statutes/constitutions.
+# Anchored to line starts so mid-sentence cross-references ("...under Section
+# 302...") and plurals ("Articles 12 to 35") do NOT split a chunk.
+_HEADING_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"(?:Article|ARTICLE|Art|Section|SECTION|Sec)\b\.?[ \t]+\d+[A-Za-z]?\b"
+    r"|\d{1,3}[A-Za-z]?\.[ \t]+[A-Z]"
+    r")",
+    re.MULTILINE,
+)
+
 
 @lru_cache(maxsize=1)
 def _find_tessdata() -> str | None:
@@ -252,12 +265,23 @@ class PDFHelper:
         overlap_chars: int = 400,
     ) -> list[PDFChunk]:
         """
-        Group consecutive pages into chunks up to max_chars.
-        If a single page is too large, split it into smaller chunks.
+        Split pages into structure-aware chunks for retrieval.
 
-        Consecutive accumulated chunks share overlap_chars characters from the
-        end of the previous chunk, improving RAG recall at chunk boundaries.
-        Overlap is skipped when the next page is too large to fit alongside it.
+        Legal text is segmented on Article/Section headings (see _HEADING_RE) so
+        each provision becomes its own chunk — a query for "Article 21" no longer
+        lands in a blob spanning Articles 18-25, which is the single biggest lever
+        on retrieval precision. Concretely:
+
+          - Each page is split at heading boundaries; a heading-led segment always
+            starts a fresh chunk, and trailing non-heading text (e.g. a provision
+            continuing onto the next page) is appended to the current chunk.
+          - Segments longer than max_chars are sub-split, and the heading line is
+            prepended to each continuation piece so every chunk stays citable.
+          - When no headings are present the segments are plain page text, so
+            behaviour degrades to size-based accumulation with overlap (unchanged).
+
+        Consecutive size-based chunks share overlap_chars characters; overlap is
+        never carried across a heading boundary (provisions stay isolated).
         """
         chunks: list[PDFChunk] = []
 
@@ -313,52 +337,96 @@ class PDFHelper:
             current_start_page = None
             current_end_page = None
 
-        for page in pages:
-            page_text = page.text.strip()
-            if not page_text:
+        for text, page_no, is_heading in self._segment_pages(pages):
+            text = text.strip()
+            if not text:
                 continue
 
-            if len(page_text) > max_chars:
+            # A heading starts a new provision → begin a fresh chunk and never
+            # bleed the previous provision's tail (overlap) into it.
+            if is_heading and current_parts:
                 flush_current()
-                # Large-page split manages its own overlap; discard carry
                 _overlap_text = ""
                 _overlap_page = None
-                page_chunks = self._split_long_text(
-                    page_text, max_chars=max_chars, overlap_chars=overlap_chars
+
+            if len(text) > max_chars:
+                flush_current()
+                # Oversized segment manages its own overlap; discard carry.
+                _overlap_text = ""
+                _overlap_page = None
+                heading = text.split("\n", 1)[0].strip()[:100] if is_heading else ""
+                # Reserve room so a prepended heading never pushes a piece over max.
+                budget = max(1, max_chars - len(heading) - 1) if heading else max_chars
+                pieces = self._split_long_text(
+                    text, max_chars=budget, overlap_chars=min(overlap_chars, budget - 1)
                 )
-                for piece in page_chunks:
+                for i, piece in enumerate(pieces):
                     piece = piece.strip()
                     if not piece:
                         continue
+                    # Re-state the heading on continuation pieces so each stays citable.
+                    if heading and i > 0:
+                        piece = f"{heading}\n{piece}"
                     chunks.append(
                         PDFChunk(
                             chunk_index=chunk_index,
-                            page_start=page.page_number,
-                            page_end=page.page_number,
+                            page_start=page_no,
+                            page_end=page_no,
                             content=piece,
                         )
                     )
                     chunk_index += 1
                 continue
 
-            # Seed a fresh buffer with overlap from the previous chunk
-            if not current_parts:
-                _seed_overlap(len(page_text))
+            # Overlap is only carried across size-based flushes, not into headings.
+            if not current_parts and not is_heading:
+                _seed_overlap(len(text))
 
-            candidate_len = current_len + len(page_text) + (2 if current_parts else 0)
+            candidate_len = current_len + len(text) + (2 if current_parts else 0)
             if current_parts and candidate_len > max_chars:
                 flush_current()
-                _seed_overlap(len(page_text))
+                if not is_heading:
+                    _seed_overlap(len(text))
 
             if not current_parts:
-                current_start_page = page.page_number
+                current_start_page = page_no
 
-            current_parts.append(page_text)
-            current_len += len(page_text) + (2 if current_len else 0)
-            current_end_page = page.page_number
+            current_parts.append(text)
+            current_len += len(text) + (2 if current_len else 0)
+            current_end_page = page_no
 
         flush_current()
         return chunks
+
+    @staticmethod
+    def _segment_pages(
+        pages: list[PDFPageText],
+    ) -> list[tuple[str, int, bool]]:
+        """
+        Flatten pages into (text, page_number, is_heading) segments, splitting
+        each page at Article/Section heading boundaries. Text before the first
+        heading (a preamble, or a provision continued from the previous page) is
+        emitted as a non-heading segment. Empty pages/segments are dropped.
+        """
+        segments: list[tuple[str, int, bool]] = []
+        for page in pages:
+            text = page.text.strip()
+            if not text:
+                continue
+            starts = [m.start() for m in _HEADING_RE.finditer(text)]
+            if not starts:
+                segments.append((text, page.page_number, False))
+                continue
+            if starts[0] > 0:
+                pre = text[: starts[0]].strip()
+                if pre:
+                    segments.append((pre, page.page_number, False))
+            for i, start in enumerate(starts):
+                end = starts[i + 1] if i + 1 < len(starts) else len(text)
+                seg = text[start:end].strip()
+                if seg:
+                    segments.append((seg, page.page_number, True))
+        return segments
 
     def build_typesense_chunk_documents(
         self,

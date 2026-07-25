@@ -1,6 +1,6 @@
 [project]
 name = "legal-rag-ai"
-version = "0.1.0"
+version = "0.0.3"
 description = "Legal RAG AI — PDF ingestion, semantic search, and Q&A over legal documents."
 readme = "README.md"
 requires-python = ">=3.13"
