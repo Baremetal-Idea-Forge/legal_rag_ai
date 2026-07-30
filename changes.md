@@ -2,6 +2,50 @@
 
 Version-wise record of notable changes.
 
+## 0.2.0
+
+**ACTION_PLAN v2 retrieval deltas: L6 conditional lexical routing, Gate-1
+abstention floor, abstain-first verification (regenerate loop removed).**
+
+Implements the v2 design's changed decisions in the existing
+FastAPI/Typesense stack. Everything is CPU-only rule-based code — no new
+models or Apple-specific dependencies; runs unchanged on AMD/Linux.
+
+### Added
+- **Exact-term detector** (`services/exact_terms.py`) — rule-based L6 routing
+  signal: quoted phrases, §/Section/Article/Rule/Order numbers (arabic or
+  uppercase Roman), and mid-query Defined Term capitalization runs.
+- **L6 conditional lexical routing** (`EXACT_TERM_ROUTING_ENABLED`, default
+  off): with the flag on, the RAG read path is dense-only (`vector`) and the
+  lexical (`hybrid`) channel fires only on detector-flagged queries — Reuter
+  App. B: BM25 binds documents but costs span precision. Off = pre-v2
+  always-hybrid behavior. The chosen mode is reported as
+  `ChatResponse.retrieval_mode` and audited.
+- **Gate 1 — retrieval-score floor** (`GATE1_MIN_SCORE`, default 0.0 = off):
+  when the best dense chunk score (1 − vector_distance) is below the floor,
+  the service abstains *before any generation call*, attaching the nearest
+  documents (`scoped_documents`) for review. Keyword-only hit sets carry no
+  dense plane and skip the gate. One rewrite-and-re-retrieve attempt runs
+  first (`GATE1_REWRITE_RETRY`, L11) — now the only place query rewriting
+  exists.
+- **Doc-level eval metrics** (`tests/eval/`): DocHit@k and DRM@k (document-
+  retrieval mismatch, Reuter's headline failure metric) via an optional
+  `expected_doc` field in the golden set; `run_eval.py --routed` benchmarks
+  per-query L6 routing before the flag is enabled.
+
+### Changed
+- **Verification is abstain-first (Gate 2).** On a failed min-of-triad gate
+  the service abstains immediately with best-effort sources instead of
+  rewriting and regenerating (v2 non-goal R8: regenerate loops doubled
+  latency without fixing groundedness). `VERIFY_MAX_RETRIES` is removed from
+  config; `VERIFY_ENABLED`/`VERIFY_MIN_TRIAD_SCORE` are unchanged.
+- Default behavior is unchanged with all new flags at their defaults (always-
+  hybrid retrieval, no Gate-1 floor), matching the 0.1.0 flag discipline.
+
+### Tests
+- `pytest`: 618 passed, 1 skipped (+31 net new across exact-terms/routing/
+  Gate-1/abstain-first/doc-metrics; corpus-dependent count).
+
 ## 0.0.3
 
 **Improve semantic search: structure-aware (legal) chunking + a retrieval eval harness.**

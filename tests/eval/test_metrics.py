@@ -69,3 +69,45 @@ class TestAggregate:
     def test_empty_rows(self):
         agg = metrics.aggregate([], k=5)
         assert agg == {"queries": 0, "k": 5, "hit@k": 0.0, "mrr@k": 0.0, "recall@k": 0.0}
+
+
+class TestDocHitAtK:
+    def test_expected_doc_in_top_k(self):
+        docs = ["OTHER_ACT.pdf", "CONSTITUTION_OF_INDIA.pdf"]
+        assert metrics.dochit_at_k(docs, "CONSTITUTION_OF_INDIA", k=2) == 1.0
+
+    def test_expected_doc_beyond_k_is_miss(self):
+        docs = ["OTHER_ACT.pdf", "CONSTITUTION_OF_INDIA.pdf"]
+        assert metrics.dochit_at_k(docs, "CONSTITUTION_OF_INDIA", k=1) == 0.0
+
+    def test_substring_and_case_insensitive(self):
+        assert metrics.dochit_at_k(["constitution_of_india.pdf"], "Constitution", k=1) == 1.0
+
+
+class TestDrmAtK:
+    def test_all_chunks_from_right_doc(self):
+        docs = ["CONSTITUTION_OF_INDIA.pdf"] * 3
+        assert metrics.drm_at_k(docs, "CONSTITUTION_OF_INDIA", k=3) == 0.0
+
+    def test_mixed_documents(self):
+        docs = ["CONSTITUTION_OF_INDIA.pdf", "OTHER.pdf", "OTHER.pdf", "OTHER.pdf"]
+        assert metrics.drm_at_k(docs, "CONSTITUTION_OF_INDIA", k=4) == 0.75
+
+    def test_empty_retrieval_is_full_mismatch(self):
+        assert metrics.drm_at_k([], "CONSTITUTION_OF_INDIA", k=5) == 1.0
+
+
+class TestAggregateDocs:
+    def test_averages_over_rows(self):
+        rows = [
+            (["RIGHT.pdf", "RIGHT.pdf"], "RIGHT"),   # dochit=1, drm=0
+            (["WRONG.pdf", "WRONG.pdf"], "RIGHT"),   # dochit=0, drm=1
+        ]
+        agg = metrics.aggregate_docs(rows, k=2)
+        assert agg["queries"] == 2
+        assert agg["dochit@k"] == 0.5
+        assert agg["drm@k"] == 0.5
+
+    def test_empty_rows(self):
+        agg = metrics.aggregate_docs([], k=5)
+        assert agg == {"queries": 0, "k": 5, "dochit@k": 0.0, "drm@k": 0.0}

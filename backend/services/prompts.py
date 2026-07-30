@@ -117,7 +117,7 @@ def build_messages(query: str, context: str) -> list[dict[str, str]]:
 
 
 def build_rewrite_messages(query: str) -> list[dict[str, str]]:
-    """One-shot query rewrite for the verification feedback loop."""
+    """One-shot query rewrite for the Gate-1 weak-retrieval retry (L11)."""
     user = (
         "Rewrite this legal research question to be clearer and more specific, "
         "so a document search is more likely to find its answer. Preserve its "

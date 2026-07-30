@@ -9,12 +9,18 @@ called at all — we return a fixed "not found" answer (no hallucination).
 
 Feature-flagged stages (all off by default, see core.config):
 
+  - EXACT_TERM_ROUTING_ENABLED — L6 routing: dense-only retrieval by default,
+    the lexical (hybrid) channel only when the exact-term detector flags the
+    query. Off = always hybrid (pre-v2 behavior).
+  - GATE1_MIN_SCORE — Gate 1: abstain before any generation call when the best
+    dense score is below the floor, optionally after one rewrite-and-retry
+    (GATE1_REWRITE_RETRY) — the only place query rewriting exists in v2.
   - TWO_STAGE_ENABLED — document-scoped retrieval with a stage-1 abstention
     floor (ABSTAIN_MIN_DOC_SCORE).
   - VERIFY_ENABLED — triad verification gated on min(scores); on failure the
-    query is rewritten and retried, capped at VERIFY_MAX_RETRIES, then the
-    service abstains rather than emit an unverified answer. Streaming skips
-    this gate: its tokens are already with the client before a judge could run.
+    service abstains with best-effort sources (Gate 2, abstain-first — v2
+    removed the regenerate loop, R8). Streaming skips this gate: its tokens
+    are already with the client before a judge could run.
   - AUDIT_LOG_ENABLED — one JSONL record per response, written before the
     response is returned.
 """
@@ -32,10 +38,25 @@ from models.schemas import ChatResponse, ChunkHit, DocumentScope, VerificationSc
 from services import prompts
 from services.audit import AuditLog
 from services.cite import bind_citations
+from services.exact_terms import detect_exact_terms
 from services.search_service import SearchService
 from services.verify import AnswerVerifier
 
 logger = logging.getLogger(__name__)
+
+
+def _best_dense_score(hits: list[ChunkHit]) -> float | None:
+    """
+    Best dense similarity (1 - vector_distance) among the hits, or None when
+    no hit carries one. Gate 1 floors on this plane only — keyword text_match
+    scores are unbounded integers and cannot share a floor with it.
+    """
+    scores = [
+        h.score
+        for h in hits
+        if h.vector_distance is not None and h.score is not None
+    ]
+    return max(scores) if scores else None
 
 
 class RagService:
@@ -59,7 +80,9 @@ class RagService:
     # -- non-streaming ------------------------------------------------------
 
     async def answer(self, query: str, *, top_k: int | None = None) -> ChatResponse:
-        used, scopes, abstain_reason = await self._retrieve_context(query, top_k)
+        used, scopes, abstain_reason, mode = await self._retrieve_context(
+            query, top_k
+        )
         if abstain_reason or not used:
             reason = abstain_reason or "retrieval returned no usable context"
             logger.info("Abstaining on '%s': %s", query[:60], reason)
@@ -72,70 +95,58 @@ class RagService:
                     abstained=True,
                     abstain_reason=reason,
                     scoped_documents=scopes,
+                    retrieval_mode=mode,
                 )
             )
 
-        current_query = query
-        attempts = 0
-        while True:
-            context_text = prompts.format_context(used)
-            messages = prompts.build_messages(current_query, context_text)
-            answer_text = await self._llm.chat(
-                messages, temperature=self._settings.LLM_TEMPERATURE
-            )
+        context_text = prompts.format_context(used)
+        messages = prompts.build_messages(query, context_text)
+        answer_text = await self._llm.chat(
+            messages, temperature=self._settings.LLM_TEMPERATURE
+        )
 
-            verification = await self._verify(query, context_text, answer_text)
-            gate = self._settings.VERIFY_MIN_TRIAD_SCORE
-            if verification is None or verification.minimum >= gate:
-                citations, coverage = bind_citations(answer_text, used)
-                return self._respond(
-                    ChatResponse(
-                        query=query,
-                        answer=answer_text,
-                        citations=citations,
-                        chunks_used=used,
-                        citation_coverage=coverage,
-                        verification=verification,
-                        scoped_documents=scopes,
-                    )
-                )
-
-            if attempts >= self._settings.VERIFY_MAX_RETRIES:
-                # Abstain, but attach the best-effort spans so a reviewer can
-                # see what the system looked at before declining.
-                citations, _ = bind_citations(answer_text, used)
-                return self._respond(
-                    ChatResponse(
-                        query=query,
-                        answer=prompts.UNVERIFIED_ANSWER,
-                        citations=citations,
-                        chunks_used=used,
-                        citation_coverage=0.0,
-                        abstained=True,
-                        abstain_reason=(
-                            f"verification minimum {verification.minimum:.2f} "
-                            f"below gate {gate} after {attempts + 1} attempts"
-                        ),
-                        verification=verification,
-                        scoped_documents=scopes,
-                    )
-                )
-
-            attempts += 1
+        verification = await self._verify(query, context_text, answer_text)
+        gate = self._settings.VERIFY_MIN_TRIAD_SCORE
+        if verification is not None and verification.minimum < gate:
+            # Gate 2, abstain-first: an answer that failed the triad is
+            # declined, never regenerated (v2 non-goal R8). The best-effort
+            # spans stay attached so a reviewer sees what was looked at.
             logger.info(
-                "Verification gate failed (min %.2f < %s); attempt %d/%d with "
-                "a rewritten query.",
-                verification.minimum, gate, attempts,
-                self._settings.VERIFY_MAX_RETRIES,
+                "Verification gate failed (min %.2f < %s); abstaining.",
+                verification.minimum, gate,
             )
-            current_query = await self._rewrite_query(current_query)
-            refreshed, new_scopes, retry_abstain = await self._retrieve_context(
-                current_query, top_k
+            citations, _ = bind_citations(answer_text, used)
+            return self._respond(
+                ChatResponse(
+                    query=query,
+                    answer=prompts.UNVERIFIED_ANSWER,
+                    citations=citations,
+                    chunks_used=used,
+                    citation_coverage=0.0,
+                    abstained=True,
+                    abstain_reason=(
+                        f"verification minimum {verification.minimum:.2f} "
+                        f"below gate {gate}"
+                    ),
+                    verification=verification,
+                    scoped_documents=scopes,
+                    retrieval_mode=mode,
+                )
             )
-            # A rewrite that retrieves nothing keeps the previous context —
-            # regenerating against it can still clear the gate.
-            if refreshed and not retry_abstain:
-                used, scopes = refreshed, new_scopes
+
+        citations, coverage = bind_citations(answer_text, used)
+        return self._respond(
+            ChatResponse(
+                query=query,
+                answer=answer_text,
+                citations=citations,
+                chunks_used=used,
+                citation_coverage=coverage,
+                verification=verification,
+                scoped_documents=scopes,
+                retrieval_mode=mode,
+            )
+        )
 
     # -- streaming ----------------------------------------------------------
 
@@ -149,7 +160,9 @@ class RagService:
         Verification does not run here — tokens are already with the client
         before any judge could score them. Use `answer` where the gate matters.
         """
-        used, scopes, abstain_reason = await self._retrieve_context(query, top_k)
+        used, scopes, abstain_reason, mode = await self._retrieve_context(
+            query, top_k
+        )
         if abstain_reason or not used:
             reason = abstain_reason or "retrieval returned no usable context"
             logger.info("Abstaining on streaming '%s': %s", query[:60], reason)
@@ -164,6 +177,7 @@ class RagService:
                     abstained=True,
                     abstain_reason=reason,
                     scoped_documents=scopes,
+                    retrieval_mode=mode,
                 )
             )
             return
@@ -192,6 +206,7 @@ class RagService:
                 chunks_used=used,
                 citation_coverage=coverage,
                 scoped_documents=scopes,
+                retrieval_mode=mode,
             )
         )
 
@@ -199,53 +214,129 @@ class RagService:
 
     async def _retrieve_context(
         self, query: str, top_k: int | None
-    ) -> tuple[list[ChunkHit], list[DocumentScope], str | None]:
+    ) -> tuple[list[ChunkHit], list[DocumentScope], str | None, str]:
         """
-        Retrieve and budget-select context.
+        Route, retrieve, gate, and budget-select context.
 
-        Returns (selected hits, stage-1 document scopes, abstain reason).
-        A non-None reason means the two-stage path declined before span
-        retrieval; scopes may still carry what stage 1 saw, for the audit
+        Returns (selected hits, document scopes, abstain reason, search mode).
+        A non-None reason means retrieval declined before generation — either
+        the two-stage stage-1 floor or Gate 1; scopes then carry what was seen
+        (stage-1 documents or the Gate-1 nearest documents) for the audit
         record.
         """
         settings = self._settings
         top_k = top_k or settings.RAG_TOP_K
         scopes: list[DocumentScope] = []
+        mode = self._route_mode(query)
 
-        if settings.RETRIEVAL_VIA_MCP and self._mcp is not None:
-            # Read path routed through the MCP server (Step 3 topology).
-            hits = await self._mcp.search(query, top_k=top_k, mode="hybrid")
-        elif settings.TWO_STAGE_ENABLED:
+        if settings.TWO_STAGE_ENABLED and not (
+            settings.RETRIEVAL_VIA_MCP and self._mcp is not None
+        ):
             result, scopes = await run_in_threadpool(
-                self._search.search_two_stage, query, top_k=top_k, mode="hybrid"
+                self._search.search_two_stage, query, top_k=top_k, mode=mode
             )
             if not scopes:
-                return [], [], "stage 1 retrieval found no candidate documents"
+                return [], [], "stage 1 retrieval found no candidate documents", mode
             floor = settings.ABSTAIN_MIN_DOC_SCORE
             if floor > 0 and scopes[0].score < floor:
                 return [], scopes, (
                     f"top document score {scopes[0].score:.4f} below the "
                     f"abstention floor {floor}"
-                )
+                ), mode
             hits = result.hits
         else:
-            # Direct retrieval; sync call offloaded so the event loop is free.
-            result = await run_in_threadpool(
-                self._search.search, query, top_k=top_k, mode="hybrid"
-            )
-            hits = result.hits
+            hits = await self._search_once(query, top_k=top_k, mode=mode)
+            hits, gate_reason = await self._gate1(query, hits, top_k=top_k, mode=mode)
+            if gate_reason:
+                # Abstain with the nearest documents attached — the review
+                # trail Gate 1 owes for a zero-generation decline.
+                nearest = SearchService._aggregate_documents(hits, strategy="max")
+                return [], nearest, gate_reason, mode
 
         selected = prompts.select_hits_within(
             hits, max_chars=settings.RAG_MAX_CONTEXT_CHARS
         )
         logger.info(
-            "Retrieved %d → selected %d (max_chars=%s) for query '%s'",
+            "Retrieved %d → selected %d (mode=%s, max_chars=%s) for query '%s'",
             len(hits),
             len(selected),
+            mode,
             settings.RAG_MAX_CONTEXT_CHARS,
             query[:60],
         )
-        return selected, scopes, None
+        return selected, scopes, None, mode
+
+    def _route_mode(self, query: str) -> str:
+        """
+        L6 routing: dense-only by default, the lexical (hybrid) channel only
+        when the exact-term detector fires. With the flag off, every query
+        stays on the pre-v2 hybrid path.
+        """
+        if not self._settings.EXACT_TERM_ROUTING_ENABLED:
+            return "hybrid"
+        flag = detect_exact_terms(query)
+        if flag.flagged:
+            logger.info(
+                "Exact-term route fired (%s) for '%s'",
+                ",".join(flag.reasons), query[:60],
+            )
+            return "hybrid"
+        return "vector"
+
+    async def _search_once(
+        self, query: str, *, top_k: int, mode: str
+    ) -> list[ChunkHit]:
+        """One retrieval pass over whichever read path is configured."""
+        if self._settings.RETRIEVAL_VIA_MCP and self._mcp is not None:
+            # Read path routed through the MCP server (Step 3 topology).
+            return await self._mcp.search(query, top_k=top_k, mode=mode)
+        # Direct retrieval; sync call offloaded so the event loop is free.
+        result = await run_in_threadpool(
+            self._search.search, query, top_k=top_k, mode=mode
+        )
+        return result.hits
+
+    async def _gate1(
+        self, query: str, hits: list[ChunkHit], *, top_k: int, mode: str
+    ) -> tuple[list[ChunkHit], str | None]:
+        """
+        Gate 1 — retrieval-score floor (ACTION_PLAN v2 §2.3 [Q6]).
+
+        Compares the best dense chunk score (1 - vector_distance) against
+        GATE1_MIN_SCORE; keyword text_match scores are unbounded integers and
+        cannot share the floor, so hit sets without a dense score skip the
+        gate. Below the floor, one rewrite-and-re-retrieve attempt runs
+        (GATE1_REWRITE_RETRY) before abstention. Returns (hits, abstain
+        reason); a non-None reason means abstain without calling the LLM.
+        """
+        floor = self._settings.GATE1_MIN_SCORE
+        if floor <= 0:
+            return hits, None
+        best = _best_dense_score(hits)
+        if best is None:
+            # Nothing to floor: empty retrieval (the caller's no-context
+            # abstention covers it) or keyword-only hits without a dense score.
+            return hits, None
+        if best >= floor:
+            return hits, None
+
+        if self._settings.GATE1_REWRITE_RETRY:
+            rewritten = await self._rewrite_query(query)
+            if rewritten != query:
+                retry_hits = await self._search_once(
+                    rewritten, top_k=top_k, mode=mode
+                )
+                retry_best = _best_dense_score(retry_hits)
+                if retry_best is not None and retry_best >= floor:
+                    logger.info(
+                        "Gate 1 cleared on rewrite (%.4f → %.4f) for '%s'",
+                        best, retry_best, query[:60],
+                    )
+                    return retry_hits, None
+
+        return hits, (
+            f"best retrieval score {best:.4f} below the Gate-1 floor {floor}"
+        )
 
     async def _verify(
         self, query: str, context_text: str, answer_text: str
@@ -285,6 +376,7 @@ class RagService:
             "verification": (
                 response.verification.model_dump() if response.verification else None
             ),
+            "retrieval_mode": response.retrieval_mode,
             "scoped_documents": [d.model_dump() for d in response.scoped_documents],
             "chunks": [
                 {
@@ -300,6 +392,8 @@ class RagService:
             "plan": {
                 "two_stage": settings.TWO_STAGE_ENABLED,
                 "verify": settings.VERIFY_ENABLED,
+                "exact_term_routing": settings.EXACT_TERM_ROUTING_ENABLED,
+                "gate1_min_score": settings.GATE1_MIN_SCORE,
                 "top_k": settings.RAG_TOP_K,
             },
             "model": {
