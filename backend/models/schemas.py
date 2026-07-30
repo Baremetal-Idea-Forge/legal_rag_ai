@@ -36,6 +36,10 @@ class ChunkHit(BaseModel):
     score: float | None = None
     text_match: int | None = None
     vector_distance: float | None = None
+    # Character span in the parent document's normalized text. -1 for chunks
+    # indexed before spans existed; re-ingest to populate them.
+    start_char: int = -1
+    end_char: int = -1
 
 
 class SearchResponse(BaseModel):
@@ -43,6 +47,15 @@ class SearchResponse(BaseModel):
     mode: str
     count: int
     hits: list[ChunkHit]
+
+
+class DocumentScope(BaseModel):
+    """A parent document ranked by its chunks' aggregated scores (stage 1)."""
+
+    pdf_id: str
+    pdf_name: str
+    score: float
+    chunk_count: int
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +99,32 @@ class Citation(BaseModel):
     page_end: int
     chunk_index: int
     file_url: str | None = None
+    # Character span in the parent document, so a claim resolves to exact source
+    # text rather than to a page number a reader has to scan.
+    start_char: int = -1
+    end_char: int = -1
+    # Span label the generator cited (e.g. "S2"); None for unlabelled citations.
+    span_id: str | None = None
+
+
+class VerificationScores(BaseModel):
+    """
+    The RAG triad, scored independently in 0..1.
+
+    Gated on the MINIMUM, never the mean: an answer can be highly relevant to
+    the question while being largely unsupported by the retrieved text, and
+    averaging hides exactly that failure.
+    """
+
+    context_relevance: float
+    groundedness: float
+    answer_relevance: float
+
+    @property
+    def minimum(self) -> float:
+        return min(
+            self.context_relevance, self.groundedness, self.answer_relevance
+        )
 
 
 class ChatResponse(BaseModel):
@@ -93,6 +132,15 @@ class ChatResponse(BaseModel):
     answer: str
     citations: list[Citation]
     chunks_used: list[ChunkHit]
+    # Fraction of the answer's factual claims that bound to a retrieved span.
+    citation_coverage: float = 1.0
+    # True when the system declined to answer. An abstention is a valid,
+    # preferred outcome — never emit a low-groundedness answer instead.
+    abstained: bool = False
+    abstain_reason: str | None = None
+    verification: VerificationScores | None = None
+    # Documents stage 1 scoped to, when two-stage retrieval is enabled.
+    scoped_documents: list[DocumentScope] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

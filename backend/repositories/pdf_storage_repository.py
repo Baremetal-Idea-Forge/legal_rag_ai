@@ -63,7 +63,13 @@ class PdfStorageRepository:
             pages, max_chars=max_chars, overlap_chars=overlap_chars
         )
 
+    def document_text(self, pages: list[PDFPageText]) -> str:
+        """The string a chunk's (start_char, end_char) span resolves against."""
+        return self._helper.build_document_text(pages)
+
     def build_documents(
-        self, *, pdf: StoredPDF, chunks: list[PDFChunk]
+        self, *, pdf: StoredPDF, chunks: list[PDFChunk], summary: str | None = None
     ) -> list[dict[str, Any]]:
-        return self._helper.build_typesense_chunk_documents(pdf=pdf, chunks=chunks)
+        return self._helper.build_typesense_chunk_documents(
+            pdf=pdf, chunks=chunks, summary=summary
+        )

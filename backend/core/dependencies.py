@@ -19,10 +19,13 @@ from clients.ollama_client import OllamaClient
 from helpers.pdf_helper import PDFHelper
 from repositories.pdf_storage_repository import PdfStorageRepository
 from repositories.typesense_repository import TypesenseRepository
+from services.audit import AuditLog
 from services.embedding_service import EmbeddingService
 from services.ingestion_service import IngestionService
 from services.rag_service import RagService
 from services.search_service import SearchService
+from services.summarize import DocumentSummarizer
+from services.verify import AnswerVerifier
 
 
 @lru_cache(maxsize=1)
@@ -59,17 +62,30 @@ def get_embedding_service() -> EmbeddingService:
     return EmbeddingService(helper_factory=_factory)
 
 
+@lru_cache(maxsize=1)
+def get_document_summarizer() -> DocumentSummarizer:
+    settings = get_settings()
+    return DocumentSummarizer(
+        llm_client=get_llm_client(),
+        max_chars=settings.SAC_SUMMARY_MAX_CHARS,
+        tolerance_chars=settings.SAC_SUMMARY_TOLERANCE_CHARS,
+        cache_path=settings.SAC_SUMMARY_CACHE_PATH,
+    )
+
+
 def get_ingestion_service(
     settings: Settings = Depends(get_settings),
     pdf_repo: PdfStorageRepository = Depends(get_pdf_storage_repository),
     embedding_service: EmbeddingService = Depends(get_embedding_service),
     typesense_repo: TypesenseRepository = Depends(get_typesense_repository),
+    summarizer: DocumentSummarizer = Depends(get_document_summarizer),
 ) -> IngestionService:
     return IngestionService(
         pdf_repo=pdf_repo,
         embedding_service=embedding_service,
         typesense_repo=typesense_repo,
         settings=settings,
+        summarizer=summarizer,
     )
 
 
@@ -127,9 +143,14 @@ def get_rag_service(
     llm_client: GeminiClient | OllamaClient = Depends(get_llm_client),
     mcp_client: McpClient = Depends(get_mcp_client),
 ) -> RagService:
+    # Verifier and audit log are always wired; VERIFY_ENABLED /
+    # AUDIT_LOG_ENABLED gate their use inside RagService (same pattern as the
+    # summarizer with SAC_ENABLED).
     return RagService(
         search_service=search_service,
         llm_client=llm_client,
         settings=settings,
         mcp_client=mcp_client,
+        verifier=AnswerVerifier(llm_client=llm_client),
+        audit_log=AuditLog(settings.AUDIT_LOG_PATH),
     )

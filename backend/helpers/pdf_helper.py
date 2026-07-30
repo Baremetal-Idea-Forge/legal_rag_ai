@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, asdict
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, NamedTuple
 
 import pymupdf  # PyMuPDF
 
@@ -26,6 +26,13 @@ _HEADING_RE = re.compile(
     r")",
     re.MULTILINE,
 )
+
+# Separator used to concatenate page text into the single document string that
+# chunk character offsets are measured against.
+_PAGE_JOIN = "\n\n"
+
+# How much of a sub-split piece is used to locate it inside its parent segment.
+_PIECE_ANCHOR_CHARS = 60
 
 
 @lru_cache(maxsize=1)
@@ -63,12 +70,60 @@ class PDFPageText:
     text: str
 
 
+class _Segment(NamedTuple):
+    """One provision-sized slice of a page, with its place in the document."""
+
+    text: str
+    page_number: int
+    is_heading: bool
+    start: int          # absolute offset into build_document_text(pages)
+    end: int
+
+
 @dataclass
 class PDFChunk:
     chunk_index: int
     page_start: int
     page_end: int
     content: str
+    # Absolute character span of this chunk's own source material within
+    # build_document_text(pages). Every user-facing claim resolves through this
+    # pair, so it is the contract the citation layer depends on. -1 marks a
+    # chunk built outside chunk_pages (hand-constructed in tests, legacy data).
+    start_char: int = -1
+    end_char: int = -1
+
+    @property
+    def display_text(self) -> str:
+        """
+        Body only — what gets shown to users and bound to citations.
+
+        Deliberately distinct from the `retrieval_text` that ingestion embeds
+        (summary + body): the document summary is a retrieval artifact, and
+        letting it reach a citation would attribute words to a source document
+        that does not contain them.
+        """
+        return self.content
+
+    def resolve(self, document_text: str) -> str:
+        """Source text this chunk was cut from, per its character span."""
+        if self.start_char < 0 or self.end_char < 0:
+            return ""
+        return document_text[self.start_char : self.end_char]
+
+
+def build_retrieval_text(content: str, summary: str | None) -> str:
+    """
+    The text that gets EMBEDDED for a chunk: its document summary prepended to
+    the chunk body.
+
+    The single definition of the summary-augmented form, so the embedding path
+    and any audit replay agree on it. Its counterpart is `PDFChunk.display_text`
+    (body only), which is the only text ever shown or cited — a summary is a
+    retrieval aid, not source material.
+    """
+    summary = (summary or "").strip()
+    return f"{summary}\n{content}" if summary else content
 
 
 class PDFHelper:
@@ -291,6 +346,12 @@ class PDFHelper:
         current_end_page: int | None = None
         chunk_index = 0
 
+        # Character span of the chunk's OWN segments. Seeded overlap text is
+        # excluded on purpose: it is duplicated context whose source region
+        # belongs to — and is cited by — the preceding chunk.
+        current_span_start: int | None = None
+        current_span_end: int | None = None
+
         # FIX B1: carry overlap text from each flushed chunk into the next
         _overlap_text: str = ""
         _overlap_page: int | None = None
@@ -313,6 +374,7 @@ class PDFHelper:
         def flush_current() -> None:
             nonlocal current_parts, current_len, current_start_page, current_end_page
             nonlocal chunk_index, _overlap_text, _overlap_page
+            nonlocal current_span_start, current_span_end
             if not current_parts:
                 return
             content = "\n\n".join(current_parts).strip()
@@ -323,6 +385,8 @@ class PDFHelper:
                         page_start=current_start_page or 1,
                         page_end=current_end_page or (current_start_page or 1),
                         content=content,
+                        start_char=-1 if current_span_start is None else current_span_start,
+                        end_char=-1 if current_span_end is None else current_span_end,
                     )
                 )
                 chunk_index += 1
@@ -336,9 +400,15 @@ class PDFHelper:
             current_len = 0
             current_start_page = None
             current_end_page = None
+            current_span_start = None
+            current_span_end = None
 
-        for text, page_no, is_heading in self._segment_pages(pages):
-            text = text.strip()
+        for segment in self._segment_pages(pages):
+            text, page_no, is_heading = (
+                segment.text,
+                segment.page_number,
+                segment.is_heading,
+            )
             if not text:
                 continue
 
@@ -360,10 +430,14 @@ class PDFHelper:
                 pieces = self._split_long_text(
                     text, max_chars=budget, overlap_chars=min(overlap_chars, budget - 1)
                 )
+                find_cursor = 0
                 for i, piece in enumerate(pieces):
                     piece = piece.strip()
                     if not piece:
                         continue
+                    piece_start, piece_end, find_cursor = self._locate_piece(
+                        text, piece, find_cursor, segment.start
+                    )
                     # Re-state the heading on continuation pieces so each stays citable.
                     if heading and i > 0:
                         piece = f"{heading}\n{piece}"
@@ -373,6 +447,8 @@ class PDFHelper:
                             page_start=page_no,
                             page_end=page_no,
                             content=piece,
+                            start_char=piece_start,
+                            end_char=piece_end,
                         )
                     )
                     chunk_index += 1
@@ -394,53 +470,120 @@ class PDFHelper:
             current_parts.append(text)
             current_len += len(text) + (2 if current_len else 0)
             current_end_page = page_no
+            if current_span_start is None:
+                current_span_start = segment.start
+            current_span_end = segment.end
 
         flush_current()
         return chunks
 
     @staticmethod
-    def _segment_pages(
-        pages: list[PDFPageText],
-    ) -> list[tuple[str, int, bool]]:
+    def build_document_text(pages: list[PDFPageText]) -> str:
         """
-        Flatten pages into (text, page_number, is_heading) segments, splitting
-        each page at Article/Section heading boundaries. Text before the first
-        heading (a preamble, or a provision continued from the previous page) is
-        emitted as a non-heading segment. Empty pages/segments are dropped.
+        The single document string that chunk character offsets are measured
+        against: stripped page texts joined by a blank line, empty pages
+        dropped.
+
+        Ingestion never stores this blob — it is rebuilt on demand to resolve a
+        chunk's (start_char, end_char) back to source text, which is what makes
+        a citation auditable.
         """
-        segments: list[tuple[str, int, bool]] = []
+        return _PAGE_JOIN.join(t for t in (p.text.strip() for p in pages) if t)
+
+    @staticmethod
+    def _segment_pages(pages: list[PDFPageText]) -> list[_Segment]:
+        """
+        Flatten pages into provision-sized segments, splitting each page at
+        Article/Section heading boundaries. Text before the first heading (a
+        preamble, or a provision continued from the previous page) is emitted as
+        a non-heading segment. Empty pages/segments are dropped.
+
+        Each segment carries its absolute span in build_document_text(pages), so
+        `document_text[seg.start:seg.end] == seg.text` holds exactly.
+        """
+        segments: list[_Segment] = []
+        cursor = 0
         for page in pages:
             text = page.text.strip()
             if not text:
                 continue
+            # Account for the blank line build_document_text inserts between
+            # pages (never before the first one).
+            if cursor:
+                cursor += len(_PAGE_JOIN)
+            base = cursor
+            cursor += len(text)
+
             starts = [m.start() for m in _HEADING_RE.finditer(text)]
             if not starts:
-                segments.append((text, page.page_number, False))
+                segments.append(
+                    _Segment(text, page.page_number, False, base, base + len(text))
+                )
                 continue
+
+            bounds: list[tuple[int, int, bool]] = []
             if starts[0] > 0:
-                pre = text[: starts[0]].strip()
-                if pre:
-                    segments.append((pre, page.page_number, False))
+                bounds.append((0, starts[0], False))
             for i, start in enumerate(starts):
                 end = starts[i + 1] if i + 1 < len(starts) else len(text)
-                seg = text[start:end].strip()
-                if seg:
-                    segments.append((seg, page.page_number, True))
+                bounds.append((start, end, True))
+
+            for lo, hi, is_heading in bounds:
+                raw = text[lo:hi]
+                seg = raw.strip()
+                if not seg:
+                    continue
+                # Stripping moves the segment's start; keep the offset exact.
+                offset = base + lo + (len(raw) - len(raw.lstrip()))
+                segments.append(
+                    _Segment(seg, page.page_number, is_heading, offset, offset + len(seg))
+                )
         return segments
+
+    @staticmethod
+    def _locate_piece(
+        segment: str, piece: str, cursor: int, base: int
+    ) -> tuple[int, int, int]:
+        """
+        Best-effort absolute span of a sub-split piece inside its parent segment,
+        returned with the search cursor to use for the next piece.
+
+        Pieces are regrouped paragraphs, so they are not always verbatim slices
+        of the segment. Anchor on the piece's opening characters, and fall back
+        to the whole segment when even that is not found: a citation may then
+        point at a wider region than necessary, but never at the wrong one.
+        """
+        needle = piece[:_PIECE_ANCHOR_CHARS]
+        pos = segment.find(needle, cursor)
+        if pos < 0:
+            pos = segment.find(needle)
+        if pos < 0:
+            return base, base + len(segment), cursor
+        end = min(pos + len(piece), len(segment))
+        # +1 rather than `end` so overlapping pieces still match forward.
+        return base + pos, base + end, pos + 1
 
     def build_typesense_chunk_documents(
         self,
         *,
         pdf: StoredPDF | dict[str, Any],
         chunks: list[PDFChunk | dict[str, Any]],
+        summary: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Convert chunks into Typesense-ready documents with shared PDF metadata.
+
+        `content` stays body-only — it is the display and citation text. The
+        document `summary` is stored alongside it (not merged into it) so the
+        embedded `retrieval_text` can be reconstructed for audit via
+        build_retrieval_text() without ever risking a summary being cited as
+        source text.
 
         FIX B4: emit both page_start/page_end for range tracking and a single
         `page` field (= page_start) to satisfy the Typesense schema's int32 sort field.
         """
         pdf_dict = asdict(pdf) if isinstance(pdf, StoredPDF) else dict(pdf)
+        summary = (summary or "").strip()
 
         docs: list[dict[str, Any]] = []
         for chunk in chunks:
@@ -458,6 +601,10 @@ class PDFHelper:
                     "page": chunk_dict["page_start"],
                     "chunk_index": chunk_dict["chunk_index"],
                     "content": chunk_dict["content"],
+                    # Citation anchors: absolute span in build_document_text().
+                    "start_char": chunk_dict.get("start_char", -1),
+                    "end_char": chunk_dict.get("end_char", -1),
+                    "summary": summary,
                 }
             )
 

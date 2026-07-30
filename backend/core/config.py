@@ -14,7 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # -- App identity -------------------------------------------------------
     APP_NAME: str = "Legal RAG AI"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "0.1.0"
     DEBUG: bool = False
 
     # -- Deployment ------------------------------------------------------------
@@ -79,6 +79,52 @@ class Settings(BaseSettings):
     # -- RAG loop -----------------------------------------------------------
     RAG_TOP_K: int = 5
     RAG_MAX_CONTEXT_CHARS: int = 12000
+
+    # -- Summary-augmented chunking (SAC) — ACTION_PLAN Phase 2 -------------
+    # One LLM call per document produces a short GENERIC summary that is
+    # prepended to each chunk *for embedding only* (`retrieval_text`). The
+    # summary never enters `content`, which is what gets displayed and cited.
+    # Expert/role-play summary prompts retrieved the right document but made the
+    # model answer with boilerplate, so the prompt stays deliberately generic.
+    SAC_ENABLED: bool = True
+    SAC_SUMMARY_MAX_CHARS: int = 150
+    # Overrun tolerance before a single reduced-target regeneration is attempted.
+    SAC_SUMMARY_TOLERANCE_CHARS: int = 20
+    # Summaries are cached by document sha256 so re-ingestion costs no tokens.
+    SAC_SUMMARY_CACHE_PATH: str = "storage/summaries.json"
+
+    # -- Two-stage retrieval — ACTION_PLAN Phase 2 --------------------------
+    # Stage 1 retrieves over summary-augmented chunks and aggregates scores per
+    # parent document; stage 2 re-retrieves spans restricted to the winning
+    # documents. This is the lever on document-retrieval mismatch (DRM).
+    # Off by default: this changes the read path on the very next query, and the
+    # plan's own rule is that no retrieval component ships before a benchmark
+    # run on the target corpus shows it wins. Flip it on after running
+    # `python tests/eval/run_eval.py --two-stage` against your index.
+    TWO_STAGE_ENABLED: bool = False
+    TWO_STAGE_CANDIDATE_K: int = 50      # stage-1 chunk candidates to aggregate
+    TWO_STAGE_DOC_COUNT: int = 3         # documents to scope stage 2 to
+    TWO_STAGE_DOC_SCORE: str = "max"     # "max" | "sum_top3"
+
+    # Stage-1 abstention floor: when the best document score falls below this,
+    # return NoAnswer instead of retrieving spans. 0.0 disables the floor —
+    # raise it only from a benchmark sweep on your own corpus.
+    ABSTAIN_MIN_DOC_SCORE: float = 0.0
+
+    # -- Verification triad — ACTION_PLAN Phase 4 ---------------------------
+    # Context relevance / groundedness / answer relevance, each scored 0..1 by
+    # an LLM judge. The gate is min(triad), never the mean: a high answer
+    # relevance masks a low groundedness when averaged.
+    VERIFY_ENABLED: bool = False
+    VERIFY_MIN_TRIAD_SCORE: float = 0.5
+    # Bounded feedback loop: retries after a failed gate, then abstains.
+    VERIFY_MAX_RETRIES: int = 2
+
+    # -- Audit log — ACTION_PLAN Phase 5 ------------------------------------
+    # Compliance artifact, not telemetry: written BEFORE the response is
+    # returned, append-only, one JSON object per line.
+    AUDIT_LOG_ENABLED: bool = False
+    AUDIT_LOG_PATH: str = "storage/audit/audit.jsonl"
 
     # -- PDF storage + chunking --------------------------------------------
     # NOTE: PDF_STORAGE_DIR / PDF_PUBLIC_BASE_URL match the env vars read by

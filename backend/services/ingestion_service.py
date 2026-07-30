@@ -1,10 +1,13 @@
 """
 Ingestion service — orchestrates the write path:
 
-    store → extract → chunk → build docs → embed → index
+    store → extract → summarize → chunk → build docs → embed → index
 
 Idempotency: the PDF's SHA-256 is used as the pdf_id, so re-ingesting identical
 bytes produces identical chunk ids and upserts in place (no duplicates).
+
+Embedding input is the summary-augmented `retrieval_text`; the indexed `content`
+stays body-only. See helpers/pdf_helper.build_retrieval_text.
 """
 
 from __future__ import annotations
@@ -15,10 +18,12 @@ from pathlib import Path
 
 from core.config import Settings
 from core.exceptions import IngestionError
+from helpers.pdf_helper import build_retrieval_text
 from models.schemas import IngestFailure, IngestResponse
 from repositories.pdf_storage_repository import PdfStorageRepository
 from repositories.typesense_repository import TypesenseRepository
 from services.embedding_service import EmbeddingService
+from services.summarize import DocumentSummarizer
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +36,13 @@ class IngestionService:
         embedding_service: EmbeddingService,
         typesense_repo: TypesenseRepository,
         settings: Settings,
+        summarizer: DocumentSummarizer | None = None,
     ) -> None:
         self._pdf_repo = pdf_repo
         self._embeddings = embedding_service
         self._typesense = typesense_repo
         self._settings = settings
+        self._summarizer = summarizer
 
     def ingest_bytes(self, *, pdf_bytes: bytes, filename: str) -> IngestResponse:
         if not pdf_bytes:
@@ -64,8 +71,17 @@ class IngestionService:
                 f"No extractable text in '{filename}'.", detail=filename
             )
 
-        docs = self._pdf_repo.build_documents(pdf=stored, chunks=chunks)
-        embedded = self._embeddings.embed_chunk_documents(docs)
+        summary = self._summarize(pages, sha)
+        docs = self._pdf_repo.build_documents(
+            pdf=stored, chunks=chunks, summary=summary
+        )
+
+        # Embed the summary-augmented text, index the body-only text. Conflating
+        # the two is what makes a summary citable as if it were source material.
+        vectors = self._embeddings.embed_documents(
+            [build_retrieval_text(doc["content"], summary) for doc in docs]
+        )
+        embedded = [{**doc, "embedding": vec} for doc, vec in zip(docs, vectors)]
         self._typesense.index_chunks(embedded)
 
         logger.info(
@@ -81,6 +97,15 @@ class IngestionService:
             num_pages=len(pages),
             num_chunks=len(chunks),
             status="indexed",
+        )
+
+    def _summarize(self, pages: list, doc_hash: str) -> str:
+        """Document summary for SAC, or "" when disabled/unavailable."""
+        if not self._settings.SAC_ENABLED or self._summarizer is None:
+            return ""
+        document_text = self._pdf_repo.document_text(pages)
+        return self._summarizer.summarize_sync(
+            document_text=document_text, doc_hash=doc_hash
         )
 
     def ingest_directory(

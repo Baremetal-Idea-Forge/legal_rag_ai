@@ -21,8 +21,12 @@ from services.ingestion_service import IngestionService
 # --- Fakes -----------------------------------------------------------------
 
 class FakeEmbeddings:
-    def embed_chunk_documents(self, docs, text_key="content"):
-        return [{**d, "embedding": [0.1] * 4} for d in docs]
+    def __init__(self):
+        self.embedded_texts: list[str] = []
+
+    def embed_documents(self, texts):
+        self.embedded_texts.extend(texts)
+        return [[0.1] * 4 for _ in texts]
 
 
 class FakeTypesense:
@@ -60,20 +64,24 @@ class FakePdfRepo:
     def chunk(self, pages, *, max_chars, overlap_chars):
         return [PDFChunk(i, 1, 1, f"chunk {i}") for i in range(self._chunks)]
 
-    def build_documents(self, *, pdf, chunks):
+    def document_text(self, pages):
+        return "\n\n".join(p.text for p in pages)
+
+    def build_documents(self, *, pdf, chunks, summary=None):
         return [
             {"id": f"{pdf.pdf_id}_chunk_{c.chunk_index}", "content": c.content,
-             "pdf_id": pdf.pdf_id}
+             "pdf_id": pdf.pdf_id, "summary": summary or ""}
             for c in chunks
         ]
 
 
-def _make_service(pdf_repo=None, ts=None):
+def _make_service(pdf_repo=None, ts=None, embeddings=None, summarizer=None):
     return IngestionService(
         pdf_repo=pdf_repo or FakePdfRepo(),
-        embedding_service=FakeEmbeddings(),
+        embedding_service=embeddings or FakeEmbeddings(),
         typesense_repo=ts or FakeTypesense(),
         settings=get_settings(),
+        summarizer=summarizer,
     )
 
 
@@ -137,6 +145,62 @@ def test_ingest_directory_isolates_failures(tmp_path):
 def test_ingest_directory_not_a_dir_raises(tmp_path):
     with pytest.raises(IngestionError):
         _make_service().ingest_directory(tmp_path / "missing")
+
+
+# --- SAC: summary-augmented embedding, body-only index ---------------------
+
+class FakeSummarizer:
+    def __init__(self, summary="A generic document summary."):
+        self._summary = summary
+        self.calls: list[tuple[str, str]] = []
+
+    def summarize_sync(self, *, document_text, doc_hash):
+        self.calls.append((document_text, doc_hash))
+        return self._summary
+
+
+def test_sac_embeds_summary_plus_body_but_indexes_body_only():
+    ts = FakeTypesense()
+    embeddings = FakeEmbeddings()
+    summarizer = FakeSummarizer("The Contract Act — obligations.")
+    svc = _make_service(
+        FakePdfRepo(chunks=2), ts, embeddings=embeddings, summarizer=summarizer
+    )
+    svc.ingest_bytes(pdf_bytes=b"pdf", filename="x.pdf")
+
+    # Embedded text carries the summary prefix…
+    assert embeddings.embedded_texts == [
+        "The Contract Act — obligations.\nchunk 0",
+        "The Contract Act — obligations.\nchunk 1",
+    ]
+    # …but the indexed content never does (display/citation text stays body-only).
+    assert [d["content"] for d in ts.indexed] == ["chunk 0", "chunk 1"]
+    assert all(d["summary"] == "The Contract Act — obligations." for d in ts.indexed)
+
+
+def test_summarizer_receives_document_text_and_sha():
+    summarizer = FakeSummarizer()
+    svc = _make_service(FakePdfRepo(pages=2), summarizer=summarizer)
+    data = b"some pdf bytes"
+    svc.ingest_bytes(pdf_bytes=data, filename="x.pdf")
+    [(document_text, doc_hash)] = summarizer.calls
+    assert doc_hash == hashlib.sha256(data).hexdigest()
+    assert "page 1" in document_text and "page 2" in document_text
+
+
+def test_sac_disabled_skips_summarizer(monkeypatch):
+    summarizer = FakeSummarizer()
+    svc = _make_service(summarizer=summarizer)
+    monkeypatch.setattr(svc._settings, "SAC_ENABLED", False)
+    svc.ingest_bytes(pdf_bytes=b"pdf", filename="x.pdf")
+    assert summarizer.calls == []
+
+
+def test_no_summarizer_wired_embeds_body_only():
+    embeddings = FakeEmbeddings()
+    svc = _make_service(embeddings=embeddings, summarizer=None)
+    svc.ingest_bytes(pdf_bytes=b"pdf", filename="x.pdf")
+    assert embeddings.embedded_texts == ["chunk 0", "chunk 1", "chunk 2"]
 
 
 def test_ingest_directory_reports_unreadable_entry_without_crashing(tmp_path):

@@ -5,6 +5,13 @@ Search service — the read path.
 
 For vector/hybrid modes the query embedding is formatted into a Typesense
 `vector_query` string (`embedding:([...], k:N)`).
+
+`search_two_stage` adds document scoping on top: retrieve a wide band of
+candidates, aggregate their scores per parent document, then re-retrieve spans
+restricted to the winning documents. Single-stage retrieval ranks every chunk in
+the corpus against the query, so a provision that is textually similar but sits
+in the wrong statute outranks the right one — document-level retrieval mismatch.
+Scoping stage 2 removes those chunks from contention entirely.
 """
 
 from __future__ import annotations
@@ -13,7 +20,7 @@ import logging
 from typing import Any
 
 from core.config import Settings
-from models.schemas import ChunkHit, SearchResponse
+from models.schemas import ChunkHit, DocumentScope, SearchResponse
 from repositories.typesense_repository import TypesenseRepository
 from services.embedding_service import EmbeddingService
 
@@ -73,6 +80,91 @@ class SearchService:
 
         return SearchResponse(query=query, mode=mode, count=len(hits), hits=hits)
 
+    def search_two_stage(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        mode: str = "hybrid",
+        filter_by: str | None = None,
+    ) -> tuple[SearchResponse, list[DocumentScope]]:
+        """
+        Document-scoped retrieval. Returns the stage-2 spans plus the ranked
+        document scopes that produced them (needed for the abstention decision
+        and for the audit record).
+
+        An empty scope list means stage 1 found nothing; the caller decides
+        whether that is an abstention.
+        """
+        settings = self._settings
+        top_k = top_k or settings.RAG_TOP_K
+
+        stage1 = self.search(
+            query,
+            top_k=settings.TWO_STAGE_CANDIDATE_K,
+            mode=mode,
+            filter_by=filter_by,
+        )
+        scopes = self._aggregate_documents(
+            stage1.hits, strategy=settings.TWO_STAGE_DOC_SCORE
+        )
+        if not scopes:
+            logger.info("Two-stage: stage 1 returned no candidates for '%s'", query[:60])
+            return SearchResponse(query=query, mode=mode, count=0, hits=[]), []
+
+        selected = scopes[: max(1, settings.TWO_STAGE_DOC_COUNT)]
+        logger.info(
+            "Two-stage: %d candidates → %d docs scoped %s",
+            len(stage1.hits),
+            len(selected),
+            [(s.pdf_name, round(s.score, 4)) for s in selected],
+        )
+
+        scope_filter = self._scope_filter([s.pdf_id for s in selected])
+        combined = f"({filter_by}) && {scope_filter}" if filter_by else scope_filter
+        stage2 = self.search(query, top_k=top_k, mode=mode, filter_by=combined)
+        return stage2, scopes
+
+    @staticmethod
+    def _aggregate_documents(
+        hits: list[ChunkHit], *, strategy: str = "max"
+    ) -> list[DocumentScope]:
+        """
+        Collapse chunk hits into per-document scores, best document first.
+
+        "max" takes the single strongest chunk — it rewards one precise hit.
+        "sum_top3" adds the best three, rewarding a document that is relevant
+        throughout rather than at one coincidental phrase. Which wins is
+        corpus-dependent; benchmark both before choosing.
+        """
+        grouped: dict[str, list[ChunkHit]] = {}
+        for hit in hits:
+            if hit.score is None:
+                continue
+            grouped.setdefault(hit.pdf_id, []).append(hit)
+
+        scopes: list[DocumentScope] = []
+        for pdf_id, doc_hits in grouped.items():
+            scores = sorted((h.score for h in doc_hits), reverse=True)  # type: ignore[misc]
+            score = sum(scores[:3]) if strategy == "sum_top3" else scores[0]
+            scopes.append(
+                DocumentScope(
+                    pdf_id=pdf_id,
+                    pdf_name=doc_hits[0].pdf_name,
+                    score=float(score),
+                    chunk_count=len(doc_hits),
+                )
+            )
+
+        scopes.sort(key=lambda s: s.score, reverse=True)
+        return scopes
+
+    @staticmethod
+    def _scope_filter(pdf_ids: list[str]) -> str:
+        """Typesense filter restricting results to the scoped documents."""
+        joined = ",".join(pdf_ids)
+        return f"pdf_id:=[{joined}]"
+
     @staticmethod
     def _build_vector_query(embedding: list[float], top_k: int) -> str:
         vector = ",".join(repr(float(x)) for x in embedding)
@@ -108,4 +200,6 @@ class SearchService:
             score=score,
             text_match=text_match,
             vector_distance=vector_distance,
+            start_char=doc.get("start_char", -1),
+            end_char=doc.get("end_char", -1),
         )

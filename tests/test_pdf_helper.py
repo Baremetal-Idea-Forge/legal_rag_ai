@@ -970,4 +970,144 @@ class TestStructuralChunking:
         # Plurals and mid-line references must NOT create provision boundaries.
         text = "Articles 12 to 35 are fundamental rights guaranteed under Section 3 here."
         segments = PDFHelper._segment_pages([PDFPageText(1, text)])
-        assert segments == [(text, 1, False)]
+        assert [(s.text, s.page_number, s.is_heading) for s in segments] == [
+            (text, 1, False)
+        ]
+
+
+# ===========================================================================
+# 13. Character spans (citation anchors) + retrieval/display separation
+# ===========================================================================
+
+from helpers.pdf_helper import build_retrieval_text  # noqa: E402
+
+
+class TestBuildDocumentText:
+    def test_joins_stripped_pages_with_blank_line(self):
+        pages = make_pages("  First page.  ", "Second page.")
+        assert PDFHelper.build_document_text(pages) == "First page.\n\nSecond page."
+
+    def test_drops_empty_pages(self):
+        pages = make_pages("First.", "   ", "Third.")
+        assert PDFHelper.build_document_text(pages) == "First.\n\nThird."
+
+    def test_empty_input(self):
+        assert PDFHelper.build_document_text([]) == ""
+
+
+class TestChunkSpans:
+    """Every chunk's (start_char, end_char) must resolve into
+    build_document_text(pages) at exactly the material it was cut from."""
+
+    def test_single_page_single_chunk_spans_whole_page(self):
+        pages = make_pages("A short provision that fits in one chunk.")
+        doc = PDFHelper.build_document_text(pages)
+        [chunk] = PDFHelper().chunk_pages(pages, max_chars=500, overlap_chars=0)
+        assert (chunk.start_char, chunk.end_char) == (0, len(doc))
+        assert chunk.resolve(doc) == chunk.content
+
+    def test_second_page_span_accounts_for_page_join(self):
+        p1, p2 = "First page text." * 5, "Second page text." * 5
+        pages = make_pages(p1, p2)
+        doc = PDFHelper.build_document_text(pages)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=90, overlap_chars=0)
+        assert len(chunks) == 2
+        assert chunks[1].resolve(doc) == p2
+
+    def test_pages_merged_into_one_chunk_span_covers_both(self):
+        pages = make_pages("Short first.", "Short second.")
+        doc = PDFHelper.build_document_text(pages)
+        [chunk] = PDFHelper().chunk_pages(pages, max_chars=500, overlap_chars=0)
+        assert chunk.resolve(doc) == doc == chunk.content
+
+    def test_heading_segments_resolve_exactly(self):
+        text = (
+            "Preamble text introducing the statute in a sentence.\n"
+            "Article 1. Short title. This Act may be cited accordingly.\n"
+            "Article 2. Commencement. It shall come into force at once."
+        )
+        pages = make_pages(text)
+        doc = PDFHelper.build_document_text(pages)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=70, overlap_chars=0)
+        assert len(chunks) == 3  # preamble + one per article
+        for chunk in chunks:
+            assert chunk.resolve(doc) == chunk.content
+
+    def test_overlap_text_is_excluded_from_span(self):
+        p1, p2 = "First page text. " * 6, "Second page text. " * 6
+        pages = make_pages(p1, p2)
+        doc = PDFHelper.build_document_text(pages)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=150, overlap_chars=30)
+        assert len(chunks) == 2
+        # The second chunk's content is seeded with the first chunk's tail…
+        assert chunks[1].content != p2.strip()
+        # …but its span cites only its own source region.
+        assert chunks[1].resolve(doc) == p2.strip()
+
+    def test_sub_split_pieces_resolve_to_their_own_region(self):
+        paragraphs = [f"Paragraph number {i} with some words in it." for i in range(12)]
+        pages = make_pages("\n\n".join(paragraphs))
+        doc = PDFHelper.build_document_text(pages)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=120, overlap_chars=0)
+        assert len(chunks) > 2
+        for chunk in chunks:
+            resolved = chunk.resolve(doc)
+            assert resolved  # every piece located
+            assert resolved.startswith(chunk.content[:40])
+
+    def test_spans_are_monotonic_and_in_bounds(self):
+        text = "\n".join(
+            f"Article {i}. Provision {i}. Body of provision number {i}."
+            for i in range(1, 8)
+        )
+        pages = make_pages(text)
+        doc = PDFHelper.build_document_text(pages)
+        chunks = PDFHelper().chunk_pages(pages, max_chars=100, overlap_chars=0)
+        for chunk in chunks:
+            assert 0 <= chunk.start_char < chunk.end_char <= len(doc)
+        starts = [c.start_char for c in chunks]
+        assert starts == sorted(starts)
+
+    def test_hand_built_chunk_defaults_to_sentinel_and_empty_resolve(self):
+        chunk = PDFChunk(0, 1, 1, "legacy chunk")
+        assert (chunk.start_char, chunk.end_char) == (-1, -1)
+        assert chunk.resolve("whatever document text") == ""
+
+
+class TestRetrievalDisplaySeparation:
+    """The plan's non-negotiable: retrieval_text (summary + body, embedded)
+    and display_text (body only, cited) must never be conflated."""
+
+    def test_display_text_is_body_only(self):
+        chunk = PDFChunk(0, 1, 1, "No person shall be deprived of life.")
+        assert chunk.display_text == chunk.content
+        assert "summary" not in chunk.display_text.lower()
+
+    def test_retrieval_text_prepends_summary_for_embedding_only(self):
+        body = "No person shall be deprived of life."
+        summary = "The Constitution of India — fundamental rights."
+        retrieval = build_retrieval_text(body, summary)
+        assert retrieval == f"{summary}\n{body}"
+        # And the displayed/cited text is unchanged by the summary's existence.
+        assert PDFChunk(0, 1, 1, body).display_text == body
+
+    def test_retrieval_text_without_summary_is_body(self):
+        assert build_retrieval_text("body", None) == "body"
+        assert build_retrieval_text("body", "   ") == "body"
+
+    def test_typesense_documents_keep_summary_out_of_content(self):
+        stored = StoredPDF(
+            pdf_id="abc", original_filename="c.pdf", stored_filename="c.pdf",
+            local_path="/s/c.pdf", file_url="/pdfs/abc/c.pdf",
+            sha256="beef", size_bytes=10,
+        )
+        chunks = [PDFChunk(0, 1, 1, "Body text.", start_char=5, end_char=15)]
+        [doc] = PDFHelper().build_typesense_chunk_documents(
+            pdf=stored, chunks=chunks, summary="A doc summary."
+        )
+        assert doc["content"] == "Body text."          # cited text: body only
+        assert doc["summary"] == "A doc summary."      # stored separately
+        assert doc["start_char"] == 5 and doc["end_char"] == 15
+        # The embedded form is reconstructable without touching content.
+        assert build_retrieval_text(doc["content"], doc["summary"]) == \
+            "A doc summary.\nBody text."

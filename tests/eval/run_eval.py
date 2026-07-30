@@ -6,6 +6,7 @@ Needs a running Typesense with your corpus indexed (same as the app). Run:
     python tests/eval/run_eval.py
     python tests/eval/run_eval.py --k 8 --mode vector
     python tests/eval/run_eval.py --golden path/to/your_golden.json
+    python tests/eval/run_eval.py --two-stage   # document-scoped retrieval
 
 Reports mean Hit@k, MRR@k and Recall@k plus per-query detail, so every
 retrieval change (chunking, hybrid alpha, a reranker) gets a NUMBER instead of
@@ -53,19 +54,32 @@ def main() -> int:
     parser.add_argument(
         "--mode", default="hybrid", choices=["keyword", "vector", "hybrid"]
     )
+    parser.add_argument(
+        "--two-stage", action="store_true",
+        help="route through document-scoped two-stage retrieval "
+             "(uses TWO_STAGE_* settings regardless of TWO_STAGE_ENABLED)",
+    )
     args = parser.parse_args()
 
     k_default, queries = load_golden(args.golden)
     k = args.k or k_default
     search = build_search_service()
 
-    print(f"\nRetrieval eval — {len(queries)} queries, mode={args.mode}, k={k}")
+    print(
+        f"\nRetrieval eval — {len(queries)} queries, mode={args.mode}, k={k}"
+        + (", two-stage" if args.two_stage else "")
+    )
     print("-" * 72)
 
     rows: list[tuple[list[str], list[str]]] = []
     for q in queries:
         try:
-            resp = search.search(q["query"], top_k=k, mode=args.mode)
+            if args.two_stage:
+                resp, _ = search.search_two_stage(
+                    q["query"], top_k=k, mode=args.mode
+                )
+            else:
+                resp = search.search(q["query"], top_k=k, mode=args.mode)
             retrieved = [h.content for h in resp.hits]
         except Exception as exc:  # noqa: BLE001 — harness: report and abort
             print(f"  ! {q['query'][:50]!r}: search failed: {exc}")

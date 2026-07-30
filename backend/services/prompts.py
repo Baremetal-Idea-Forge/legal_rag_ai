@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from models.schemas import ChunkHit
+from services.cite import span_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -19,14 +20,23 @@ NO_CONTEXT_ANSWER = (
     "I could not find information about that in the available legal documents."
 )
 
+# Returned when retrieval found context but verification could not clear the
+# gate within its retry budget. Distinct from NO_CONTEXT_ANSWER: there *was*
+# material, we just could not stand behind an answer drawn from it.
+UNVERIFIED_ANSWER = (
+    "I found related material but could not verify an answer against it with "
+    "enough confidence to report one. The sources retrieved are listed below."
+)
+
 SYSTEM_PROMPT = """You are a precise legal research assistant. You answer \
 questions strictly using the excerpts from legal documents provided in the \
 CONTEXT below.
 
 Rules:
 1. Use ONLY the information in the CONTEXT. Do not rely on outside knowledge.
-2. Cite the source for every claim using the inline form [pdf_name p.N] that \
-appears in the context headers.
+2. Every context excerpt is labelled with a span id like [S1]. Cite the span \
+id(s) supporting each factual claim inline, e.g. "...within 30 days [S2]." \
+Cite only span ids that appear in the CONTEXT.
 3. If the CONTEXT contains material relevant to the question, answer from it — \
 even when it only partially addresses the question. Reply "I could not find \
 information about that in the available legal documents." ONLY when the CONTEXT \
@@ -45,6 +55,11 @@ def _page_ref(hit: ChunkHit) -> str:
     )
 
 
+def _block(hit: ChunkHit, index: int) -> str:
+    """One context excerpt: span label + human-readable source header + body."""
+    return f"[{span_id_for(index)}] [{hit.pdf_name} {_page_ref(hit)}]\n{hit.content}"
+
+
 def select_hits_within(hits: list[ChunkHit], *, max_chars: int) -> list[ChunkHit]:
     """
     Return the leading sublist of hits whose rendered size fits in max_chars.
@@ -53,7 +68,7 @@ def select_hits_within(hits: list[ChunkHit], *, max_chars: int) -> list[ChunkHit
     selected: list[ChunkHit] = []
     used = 0
     for i, hit in enumerate(hits):
-        block_len = len(f"[{hit.pdf_name} {_page_ref(hit)}]\n{hit.content}")
+        block_len = len(_block(hit, i))
         if selected and used + block_len > max_chars:
             logger.debug(
                 "Context limit hit at chunk %d (%s): %d + %d > %d (max_chars)",
@@ -78,10 +93,13 @@ def select_hits_within(hits: list[ChunkHit], *, max_chars: int) -> list[ChunkHit
 
 
 def format_context(hits: list[ChunkHit]) -> str:
-    """Render the given chunks into one citable context block."""
-    blocks = [
-        f"[{hit.pdf_name} {_page_ref(hit)}]\n{hit.content}" for hit in hits
-    ]
+    """
+    Render the given chunks into one citable context block.
+
+    Span labels are positional ([S1] = hits[0]), matching services.cite's
+    binding of the answer's labels back to these same hits.
+    """
+    blocks = [_block(hit, i) for i, hit in enumerate(hits)]
     return "\n\n---\n\n".join(blocks)
 
 
@@ -89,9 +107,21 @@ def build_messages(query: str, context: str) -> list[dict[str, str]]:
     user = (
         f"CONTEXT:\n{context}\n\n"
         f"QUESTION: {query}\n\n"
-        "Answer using only the CONTEXT above, with inline [source p.N] citations."
+        "Answer using only the CONTEXT above, citing the supporting span id "
+        "inline after each factual claim, e.g. [S1]."
     )
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user},
     ]
+
+
+def build_rewrite_messages(query: str) -> list[dict[str, str]]:
+    """One-shot query rewrite for the verification feedback loop."""
+    user = (
+        "Rewrite this legal research question to be clearer and more specific, "
+        "so a document search is more likely to find its answer. Preserve its "
+        "meaning. Reply with ONLY the rewritten question.\n\n"
+        f"QUESTION: {query}"
+    )
+    return [{"role": "user", "content": user}]

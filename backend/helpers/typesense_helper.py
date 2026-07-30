@@ -40,6 +40,14 @@ PDF_CHUNKS_SCHEMA: dict[str, Any] = {
         {"name": "page_end",      "type": "int32",   "optional": True},
         {"name": "chunk_index",   "type": "int32"},
         {"name": "content",       "type": "string"},
+        # Citation anchors: the chunk's absolute character span in
+        # PDFHelper.build_document_text(). Optional because chunks indexed
+        # before spans existed carry no offsets (they store -1 once re-ingested).
+        {"name": "start_char",    "type": "int32",   "optional": True},
+        {"name": "end_char",      "type": "int32",   "optional": True},
+        # Document-level summary used to build the embedded retrieval_text.
+        # Stored, never merged into `content`, and never cited.
+        {"name": "summary",       "type": "string",  "optional": True},
         # Optional so documents can be stored before embeddings are computed.
         {"name": "embedding",     "type": "float[]", "num_dim": 1024, "optional": True},
     ],
