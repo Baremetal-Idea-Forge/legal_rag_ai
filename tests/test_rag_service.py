@@ -23,9 +23,11 @@ class FakeSearch:
     def __init__(self, hits):
         self._hits = hits
         self.calls = 0
+        self.last_mode = None
 
     def search(self, query, *, top_k=5, mode="hybrid", filter_by=None):
         self.calls += 1
+        self.last_mode = mode
         return SearchResponse(query=query, mode=mode, count=len(self._hits), hits=self._hits)
 
 
@@ -47,11 +49,14 @@ class FakeOllama:
             yield t
 
 
-def _hit(i=0, content="legal content", pages=(1, 1)):
+def _hit(i=0, content="legal content", pages=(1, 1), dense_score=None):
+    """dense_score also sets vector_distance so Gate 1 sees a dense plane."""
     return ChunkHit(
         id=f"c{i}", pdf_id=f"p{i}", pdf_name=f"doc{i}.pdf",
         page_start=pages[0], page_end=pages[1], chunk_index=i, content=content,
         file_url=f"/pdfs/p{i}/doc{i}.pdf",
+        score=dense_score,
+        vector_distance=None if dense_score is None else round(1.0 - dense_score, 6),
     )
 
 
@@ -395,38 +400,15 @@ def test_verified_answer_passes_gate_first_try():
     assert ollama.chat_calls == 1  # no rewrite happened
 
 
-def test_gate_failure_rewrites_query_and_retries():
-    verifier = FakeVerifier(_triad(0.2), _triad(0.9))
-    llm = QueueLLM(
-        "First answer, poorly grounded in the sources it cites [S1].",
-        "rewritten sharper query",
-        "Second answer, well grounded [S1].",
-    )
+def test_gate_failure_abstains_first_try_without_regeneration():
+    # v2 non-goal R8: an answer that failed the triad is declined, never
+    # regenerated — abstention is cheaper and more honest than a retry loop.
+    verifier = FakeVerifier(_triad(0.2))
+    llm = QueueLLM("Unverifiable answer, drawn from thin air entirely [S1].")
     search = FakeSearch([_hit(0)])
     svc = RagService(
         search_service=search, llm_client=llm,
         settings=_verify_settings(), verifier=verifier,
-    )
-    resp = asyncio.run(svc.answer("original query"))
-
-    assert resp.abstained is False
-    assert resp.answer == "Second answer, well grounded [S1]."
-    assert verifier.calls == 2
-    assert search.calls == 2  # re-retrieved with the rewritten query
-    # The regeneration prompt was built from the rewritten query.
-    assert "rewritten sharper query" in llm.messages_log[2][1]["content"]
-
-
-def test_gate_exhaustion_abstains_with_best_effort_spans():
-    verifier = FakeVerifier(_triad(0.1), _triad(0.2))
-    llm = QueueLLM(
-        "Unverifiable answer one, drawn from thin air entirely [S1].",
-        "rewrite",
-        "Unverifiable answer two, no better than the first one [S1].",
-    )
-    svc = RagService(
-        search_service=FakeSearch([_hit(0)]), llm_client=llm,
-        settings=_verify_settings(VERIFY_MAX_RETRIES=1), verifier=verifier,
     )
     resp = asyncio.run(svc.answer("q"))
 
@@ -436,6 +418,9 @@ def test_gate_exhaustion_abstains_with_best_effort_spans():
     assert resp.verification is not None and resp.verification.minimum == 0.2
     assert len(resp.citations) == 1  # best-effort spans attached
     assert resp.citation_coverage == 0.0
+    assert verifier.calls == 1
+    assert llm.chat_calls == 1   # one generation; no rewrite, no regeneration
+    assert search.calls == 1     # no re-retrieval either
 
 
 def test_judge_failure_skips_gate_instead_of_blocking():
@@ -458,6 +443,153 @@ def test_verification_off_never_calls_verifier():
     resp = asyncio.run(svc.answer("q"))
     assert verifier.calls == 0
     assert resp.verification is None
+
+
+# ===========================================================================
+# L6 exact-term routing (EXACT_TERM_ROUTING_ENABLED)
+# ===========================================================================
+
+def _routing_settings() -> Settings:
+    s = Settings()
+    s.EXACT_TERM_ROUTING_ENABLED = True
+    return s
+
+
+def test_routing_uses_dense_for_semantic_queries():
+    search = FakeSearch([_hit(0)])
+    svc = RagService(
+        search_service=search, llm_client=FakeOllama(), settings=_routing_settings()
+    )
+    resp = asyncio.run(svc.answer("what are the remedies for breach of contract"))
+    assert search.last_mode == "vector"
+    assert resp.retrieval_mode == "vector"
+
+
+def test_routing_fires_lexical_on_exact_term_query():
+    search = FakeSearch([_hit(0)])
+    svc = RagService(
+        search_service=search, llm_client=FakeOllama(), settings=_routing_settings()
+    )
+    resp = asyncio.run(svc.answer("What does Section 302 of the IPC say?"))
+    assert search.last_mode == "hybrid"
+    assert resp.retrieval_mode == "hybrid"
+
+
+def test_routing_off_keeps_hybrid_for_every_query():
+    search = FakeSearch([_hit(0)])
+    svc = RagService(
+        search_service=search, llm_client=FakeOllama(), settings=Settings()
+    )
+    resp = asyncio.run(svc.answer("what are the remedies for breach of contract"))
+    assert search.last_mode == "hybrid"
+    assert resp.retrieval_mode == "hybrid"
+
+
+# ===========================================================================
+# Gate 1 — retrieval-score floor (GATE1_MIN_SCORE)
+# ===========================================================================
+
+class SequencedSearch:
+    """Returns the next hit list on each search() call (Gate-1 retry paths)."""
+
+    def __init__(self, *hit_lists):
+        self._lists = list(hit_lists)
+        self.calls = 0
+        self.queries = []
+
+    def search(self, query, *, top_k=5, mode="hybrid", filter_by=None):
+        self.calls += 1
+        self.queries.append(query)
+        hits = self._lists.pop(0) if self._lists else []
+        return SearchResponse(query=query, mode=mode, count=len(hits), hits=hits)
+
+
+def _gate1_settings(floor: float, *, retry: bool = False) -> Settings:
+    s = Settings()
+    s.GATE1_MIN_SCORE = floor
+    s.GATE1_REWRITE_RETRY = retry
+    return s
+
+
+def test_gate1_below_floor_abstains_without_llm_and_attaches_nearest_docs():
+    hits = [_hit(0, dense_score=0.3), _hit(1, dense_score=0.2)]
+    ollama = FakeOllama()
+    svc = RagService(
+        search_service=FakeSearch(hits), llm_client=ollama,
+        settings=_gate1_settings(0.5),
+    )
+    resp = asyncio.run(svc.answer("q"))
+
+    assert resp.abstained is True
+    assert resp.answer == prompts.NO_CONTEXT_ANSWER
+    assert "Gate-1" in resp.abstain_reason
+    assert ollama.chat_calls == 0  # zero-LLM-call abstention
+    # Nearest documents attached for review, best first.
+    assert [d.pdf_id for d in resp.scoped_documents] == ["p0", "p1"]
+
+
+def test_gate1_above_floor_answers_normally():
+    svc = RagService(
+        search_service=FakeSearch([_hit(0, dense_score=0.8)]),
+        llm_client=FakeOllama(), settings=_gate1_settings(0.5),
+    )
+    resp = asyncio.run(svc.answer("q"))
+    assert resp.abstained is False
+
+
+def test_gate1_rewrite_retry_clears_gate():
+    search = SequencedSearch(
+        [_hit(0, dense_score=0.3)], [_hit(1, dense_score=0.9)]
+    )
+    llm = QueueLLM("sharper rewritten query", "Grounded answer [S1].")
+    svc = RagService(
+        search_service=search, llm_client=llm,
+        settings=_gate1_settings(0.5, retry=True),
+    )
+    resp = asyncio.run(svc.answer("vague query"))
+
+    assert resp.abstained is False
+    assert resp.answer == "Grounded answer [S1]."
+    assert search.calls == 2
+    assert search.queries[1] == "sharper rewritten query"
+    assert llm.chat_calls == 2  # one rewrite + one generation
+    assert resp.chunks_used[0].pdf_id == "p1"  # answered from the retry hits
+
+
+def test_gate1_rewrite_retry_still_weak_abstains():
+    search = SequencedSearch(
+        [_hit(0, dense_score=0.3)], [_hit(1, dense_score=0.4)]
+    )
+    llm = QueueLLM("sharper rewritten query")
+    svc = RagService(
+        search_service=search, llm_client=llm,
+        settings=_gate1_settings(0.5, retry=True),
+    )
+    resp = asyncio.run(svc.answer("vague query"))
+
+    assert resp.abstained is True
+    assert "Gate-1" in resp.abstain_reason
+    assert llm.chat_calls == 1  # the rewrite only — never a generation
+
+
+def test_gate1_skipped_when_hits_carry_no_dense_score():
+    # Keyword-only hits have no comparable score plane; the gate must not
+    # abstain on them.
+    svc = RagService(
+        search_service=FakeSearch([_hit(0)]), llm_client=FakeOllama(),
+        settings=_gate1_settings(0.5),
+    )
+    resp = asyncio.run(svc.answer("q"))
+    assert resp.abstained is False
+
+
+def test_gate1_disabled_at_zero_floor():
+    svc = RagService(
+        search_service=FakeSearch([_hit(0, dense_score=0.01)]),
+        llm_client=FakeOllama(), settings=Settings(),
+    )
+    resp = asyncio.run(svc.answer("q"))
+    assert resp.abstained is False
 
 
 # ===========================================================================
@@ -484,6 +616,9 @@ def test_answer_writes_audit_record(tmp_path):
     assert record["answer"] == "An answer with a citation [S1]."
     assert record["abstained"] is False
     assert record["chunks"][0]["pdf_id"] == "p0"
+    assert record["retrieval_mode"] == "hybrid"  # routing off → pre-v2 path
+    assert record["plan"]["exact_term_routing"] is False
+    assert record["plan"]["gate1_min_score"] == 0.0
     assert record["model"]["provider"]
     assert "ts" in record
 

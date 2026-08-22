@@ -14,7 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # -- App identity -------------------------------------------------------
     APP_NAME: str = "Legal RAG AI"
-    APP_VERSION: str = "0.1.0"
+    APP_VERSION: str = "0.2.0"
     DEBUG: bool = False
 
     # -- Deployment ------------------------------------------------------------
@@ -111,14 +111,33 @@ class Settings(BaseSettings):
     # raise it only from a benchmark sweep on your own corpus.
     ABSTAIN_MIN_DOC_SCORE: float = 0.0
 
-    # -- Verification triad — ACTION_PLAN Phase 4 ---------------------------
+    # -- L6 conditional lexical routing — ACTION_PLAN v2 --------------------
+    # Dense-only retrieval is the v2 default (Reuter App. B: BM25 binds
+    # documents but costs span precision); the lexical (hybrid) channel fires
+    # only when the exact-term detector flags the query (quoted phrase,
+    # §/Section/Article number, defined term). Off = pre-v2 behavior (always
+    # hybrid). Enable after `run_eval.py --routed` wins on your corpus.
+    EXACT_TERM_ROUTING_ENABLED: bool = False
+
+    # -- Gate 1: retrieval-score floor — ACTION_PLAN v2 ---------------------
+    # When the best dense chunk score (1 - vector_distance) falls below this
+    # floor, the service abstains BEFORE any generation call, attaching the
+    # nearest documents. Keyword-only hits carry no comparable score and skip
+    # the gate. 0.0 disables — raise it only from an eval sweep.
+    GATE1_MIN_SCORE: float = 0.0
+    # One rewrite-and-re-retrieve attempt before a Gate-1 abstention (L11) —
+    # the only place query rewriting exists in v2. Costs one small LLM call
+    # on the weak-retrieval path only.
+    GATE1_REWRITE_RETRY: bool = True
+
+    # -- Verification triad — ACTION_PLAN Phase 4 / v2 Gate 2 ---------------
     # Context relevance / groundedness / answer relevance, each scored 0..1 by
     # an LLM judge. The gate is min(triad), never the mean: a high answer
-    # relevance masks a low groundedness when averaged.
+    # relevance masks a low groundedness when averaged. On failure the service
+    # abstains with best-effort sources — regenerate loops are a v2 non-goal
+    # (R8: they doubled latency without fixing groundedness).
     VERIFY_ENABLED: bool = False
     VERIFY_MIN_TRIAD_SCORE: float = 0.5
-    # Bounded feedback loop: retries after a failed gate, then abstains.
-    VERIFY_MAX_RETRIES: int = 2
 
     # -- Audit log — ACTION_PLAN Phase 5 ------------------------------------
     # Compliance artifact, not telemetry: written BEFORE the response is

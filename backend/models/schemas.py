@@ -139,8 +139,12 @@ class ChatResponse(BaseModel):
     abstained: bool = False
     abstain_reason: str | None = None
     verification: VerificationScores | None = None
-    # Documents stage 1 scoped to, when two-stage retrieval is enabled.
+    # Documents stage 1 scoped to (two-stage), or the nearest documents
+    # attached to a Gate-1 abstention so a reviewer sees what came closest.
     scoped_documents: list[DocumentScope] = Field(default_factory=list)
+    # Search mode the L6 router chose for this query ("vector" | "hybrid");
+    # None only for responses built before retrieval ran.
+    retrieval_mode: str | None = None
 
 
 # ---------------------------------------------------------------------------
